@@ -182,13 +182,11 @@ impl PricesClient {
         );
     
         if let Some(start_time) = start {
-            // Convert DateTime<Utc> to Unix timestamp
             let timestamp = start_time.timestamp();
             url.push_str(&format!("&start={}", timestamp));
         }
     
         if let Some(end_time) = end {
-            // Convert DateTime<Utc> to Unix timestamp
             let timestamp = end_time.timestamp();
             url.push_str(&format!("&end={}", timestamp));
         }

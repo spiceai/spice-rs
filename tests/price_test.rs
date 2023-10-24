@@ -26,7 +26,6 @@ mod tests {
         let pair1 = "BTC-USD";
         let pair2 = "ETH-USD";
 
-        // Convert Unix timestamps to DateTime<Utc> values
         let start_time = Utc.timestamp_opt(1697669766, 0).single();
         let end_time = Utc.timestamp_opt(1697756166, 0).single();
 
