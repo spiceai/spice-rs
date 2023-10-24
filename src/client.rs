@@ -3,7 +3,7 @@ use arrow_flight::decode::FlightRecordBatchStream;
 use std::error::Error;
 use tonic::transport::Channel;
 
-pub async fn new_spice_client(api_key: String) -> SpiceClient {
+pub async fn new_spice_client(api_key: &str) -> SpiceClient {
     return new_spice_client_with_address(
         api_key.to_string(),
         "https://data.spiceai.io".to_string(),
@@ -36,10 +36,7 @@ impl SpiceClient {
             prices: PricesClient::new(Some(http_addr), api_key),
         }
     }
-    pub async fn query(
-        &mut self,
-        query: String,
-    ) -> Result<FlightRecordBatchStream, Box<dyn Error>> {
-        self.flight.query(query).await
+    pub async fn query(&mut self, query: &str) -> Result<FlightRecordBatchStream, Box<dyn Error>> {
+        self.flight.query(query.to_string()).await
     }
 }

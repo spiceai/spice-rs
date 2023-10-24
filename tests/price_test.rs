@@ -8,7 +8,7 @@ mod tests {
     async fn new_client() -> Client {
         dotenv::from_path(Path::new(".env.local")).ok();
         let api_key = env::var("API_KEY").expect("API_KEY not found");
-        let spice_client = new_spice_client(api_key).await;
+        let spice_client = new_spice_client(&api_key).await;
         return spice_client;
     }
 
