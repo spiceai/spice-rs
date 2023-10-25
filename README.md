@@ -17,10 +17,10 @@ spice-rs = { git = "https://github.com/spiceai/spice-rs", tag = "v1.0.2" }
 **SQL Query**
 
 ```rust
-use spice_rs::new_spice_client;
+use spice_rs::Client;
 
-let mut client = new_spice_client("API_KEY").await;
-let data = client.query("SELECT * FROM eth.recent_blocks LIMIT 10;".to_string()).await;
+let mut client = Client::new("API_KEY").await;
+let data = client.query("SELECT * FROM eth.recent_blocks LIMIT 10;").await;
 ```
 
 ### HTTP API
