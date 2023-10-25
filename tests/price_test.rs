@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
-    use spice_rs::*;
+    use spice_rs::Client;
     use std::env;
     use std::path::Path;
 
@@ -10,6 +10,13 @@ mod tests {
         let api_key = env::var("API_KEY").expect("API_KEY not found");
         let spice_client = Client::new(&api_key).await;
         return spice_client;
+    }
+
+    #[tokio::test]
+    async fn test_get_supported_pairs() {
+        let spice_client = new_client().await;
+        let result = spice_client.prices.get_supported_pairs().await;
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
