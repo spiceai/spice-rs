@@ -12,15 +12,14 @@ spice-rs = { git = "https://github.com/spiceai/spice-rs", tag = "v1.0.2" }
 ```
 
 ## Usage
-
+<!-- NOTE: If you're changing the code examples below, make sure you update `tests/readme_test.rs`. -->
 ### Arrow Query
-
 **SQL Query**
 
 ```rust
 use spice_rs::new_spice_client;
 
-let client = new_spice_client("API_KEY".to_string());
+let mut client = new_spice_client("API_KEY").await;
 let data = client.query("SELECT * FROM eth.recent_blocks LIMIT 10;".to_string()).await;
 ```
 
