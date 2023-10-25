@@ -8,7 +8,7 @@ Add the following to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-spice-rs = { git = "https://github.com/spiceai/spice-rs", tag = "v1.0.1" }
+spice-rs = { git = "https://github.com/spiceai/spice-rs", tag = "v1.0.2" }
 ```
 
 ## Usage
@@ -49,4 +49,4 @@ let historical_price_data = client.prices.get_historical_prices(&["BTC-USDC"], S
 ```
 
 ## Documentation
-Check out our [Documentation](https://docs.spice.ai/sdks/rust) to learn more about how to use the Rust SDK.
+Check out our [Documentation](https://docs.spice.ai/sdks/rust-sdk) to learn more about how to use the Rust SDK.
