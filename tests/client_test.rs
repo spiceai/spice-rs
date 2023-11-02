@@ -44,6 +44,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_firecache_query() {
+        let mut spice_client = new_client().await;
+        match spice_client
+            .firecache_query("SELECT * FROM eth.recent_blocks limit 10")
+            .await
+        {
+            Ok(mut flight_data_stream) => {
+                // Read back RecordBatches
+                while let Some(batch) = flight_data_stream.next().await {
+                    match batch {
+                        Ok(batch) => {
+                            assert_eq!(batch.num_columns(), 4);
+                            assert_eq!(batch.num_rows(), 10);
+                        }
+                        Err(e) => {
+                            assert!(false, "Error: {}", e)
+                        }
+                    };
+                }
+            }
+            Err(e) => {
+                assert!(false, "Error: {}", e);
+            }
+        };
+    }
+
+    #[tokio::test]
     async fn test_query_streaming() {
         let mut spice_client = new_client().await;
         match spice_client.query(

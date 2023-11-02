@@ -32,10 +32,14 @@ impl SqlFlightClient {
         query: &str,
     ) -> std::result::Result<FlightRecordBatchStream, Box<dyn Error>> {
         match self.authenticate().await {
-            Err(e) => return Err(e.into()),
+            Err(e) => {
+                println!("{:?}", "Error Handshake");
+                return Err(e.into());
+            }
             Ok(()) => {}
         };
 
+        println!("{:?}", "Authentication Succeed");
         match self.client.execute(query.to_string(), Option::None).await {
             Ok(resp) => {
                 for ep in resp.endpoint {
