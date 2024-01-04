@@ -10,13 +10,12 @@ use base64::Engine;
 use bytes::Bytes;
 use futures::stream;
 use futures::TryStreamExt;
-use tonic::metadata::AsciiMetadataKey;
-use tonic::IntoRequest;
-
 use std::collections::HashMap;
 use std::error::Error;
 use std::str::FromStr;
+use tonic::metadata::AsciiMetadataKey;
 use tonic::transport::Channel;
+use tonic::IntoRequest;
 
 pub struct SqlFlightClient {
     token: Option<String>,
@@ -148,7 +147,8 @@ impl SqlFlightClient {
                     response_stream.map_err(FlightError::Tonic),
                 )
                 .with_headers(md));
-
+            }
+        }
         Err("No endpoints found".into())
     }
 }
