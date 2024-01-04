@@ -13,7 +13,6 @@ use futures::TryStreamExt;
 use tonic::metadata::AsciiMetadataKey;
 use tonic::IntoRequest;
 
-
 use std::collections::HashMap;
 use std::error::Error;
 use std::str::FromStr;
@@ -118,7 +117,6 @@ impl SqlFlightClient {
     pub async fn query(
         &mut self,
         query: &str,
-        firecache: bool,
     ) -> std::result::Result<FlightRecordBatchStream, Box<dyn Error>> {
         match self.authenticate().await {
             Err(e) => return Err(e.into()),

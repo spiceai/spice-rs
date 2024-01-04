@@ -60,14 +60,7 @@ impl SpiceClient {
     }
 
     pub async fn query(&mut self, query: &str) -> Result<FlightRecordBatchStream, Box<dyn Error>> {
-        self.flight.query(query, false).await
-    }
-
-    pub async fn fire_query(
-        &mut self,
-        query: &str,
-    ) -> Result<FlightRecordBatchStream, Box<dyn Error>> {
-        self.firecache.query(query, true).await
+        self.flight.query(query).await
     }
 
     pub async fn fire_query(
