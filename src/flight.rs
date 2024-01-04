@@ -148,8 +148,6 @@ impl SqlFlightClient {
                     response_stream.map_err(FlightError::Tonic),
                 )
                 .with_headers(md));
-            }
-        }
 
         Err("No endpoints found".into())
     }
