@@ -5,8 +5,8 @@ use crate::{
     tls::new_tls_flight_channel,
 };
 use arrow_flight::decode::FlightRecordBatchStream;
+use futures::try_join;
 use std::error::Error;
-use tokio::join;
 use tonic::transport::Channel;
 
 pub struct SpiceClientConfig {
@@ -25,18 +25,16 @@ impl SpiceClientConfig {
     }
 
     pub async fn load_from_default() -> Result<SpiceClientConfig, Box<dyn Error>> {
-        match join!(
+        let (flight_chan, firecache_chan) = try_join!(
             new_tls_flight_channel(FLIGHT_ADDR),
             new_tls_flight_channel(FIRECACHE_ADDR)
-        ) {
-            (Err(e), _) => Err(e),
-            (_, Err(e)) => Err(e),
-            (Ok(flight_chan), Ok(firecache_chan)) => Ok(SpiceClientConfig::new(
-                HTTPS_ADDR.to_string(),
-                flight_chan,
-                firecache_chan,
-            )),
-        }
+        )?;
+
+        Ok(SpiceClientConfig::new(
+            HTTPS_ADDR.to_string(),
+            flight_chan,
+            firecache_chan,
+        ))
     }
 }
 
