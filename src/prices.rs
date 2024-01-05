@@ -3,7 +3,8 @@ use std::error::Error;
 use std::fmt;
 
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use reqwest::{Response, StatusCode};
+use serde::{de::DeserializeOwned, Deserialize};
 
 #[derive(Debug, Deserialize)]
 pub struct HistoricalPriceData {
@@ -108,6 +109,19 @@ where
     }
 }
 
+async fn map_reqwest_response<T: DeserializeOwned>(resp: Response) -> Result<T, Box<dyn Error>> {
+    match resp.status() {
+        StatusCode::OK => {
+            let response: T = resp.json().await?;
+            Ok(response)
+        }
+        StatusCode::BAD_REQUEST => Err("Bad request".into()),
+        StatusCode::TOO_MANY_REQUESTS => Err("Rate limit exceeded, slow down".into()),
+        StatusCode::INTERNAL_SERVER_ERROR => Err("Internal server error".into()),
+        _ => Err(format!("Unexpected response status: {}", resp.status()).into()),
+    }
+}
+
 pub struct PricesClient {
     base_url: String,
     _api_key: String,
@@ -142,29 +156,11 @@ impl PricesClient {
     pub async fn get_prices(&self, pairs: &[&str]) -> Result<LatestPricesResponse, Box<dyn Error>> {
         let url = format!("{}/v1/prices?pairs={}", self.base_url, pairs.join(","));
 
-        let resp = self.add_headers(self.client.get(&url)).send().await?;
-        match resp.status() {
-            reqwest::StatusCode::OK => {
-                let response: LatestPricesResponse = resp.json().await?;
-                Ok(response)
-            }
-            reqwest::StatusCode::BAD_REQUEST => Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Bad request",
-            ))),
-            reqwest::StatusCode::TOO_MANY_REQUESTS => Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Rate limit exceeded, slow down",
-            ))),
-            reqwest::StatusCode::INTERNAL_SERVER_ERROR => Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Internal server error",
-            ))),
-            _ => Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Unexpected response status: {}", resp.status()),
-            ))),
-        }
+        self.add_headers(self.client.get(&url))
+            .send()
+            .await
+            .map(map_reqwest_response)?
+            .await
     }
 
     pub async fn get_historical_prices(
@@ -195,28 +191,10 @@ impl PricesClient {
         }
 
         println!("URL: {}", url);
-        let resp = self.add_headers(self.client.get(&url)).send().await?;
-        match resp.status() {
-            reqwest::StatusCode::OK => {
-                let response: HashMap<String, Vec<HistoricalPriceData>> = resp.json().await?;
-                Ok(response)
-            }
-            reqwest::StatusCode::BAD_REQUEST => Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Bad request",
-            ))),
-            reqwest::StatusCode::TOO_MANY_REQUESTS => Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Rate limit exceeded, slow down",
-            ))),
-            reqwest::StatusCode::INTERNAL_SERVER_ERROR => Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Internal server error",
-            ))),
-            _ => Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Unexpected response status: {}", resp.status()),
-            ))),
-        }
+        self.add_headers(self.client.get(&url))
+            .send()
+            .await
+            .map(map_reqwest_response)?
+            .await
     }
 }
