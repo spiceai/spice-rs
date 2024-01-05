@@ -8,8 +8,7 @@ mod tests {
     async fn new_client() -> Client {
         dotenv::from_path(Path::new(".env.local")).ok();
         let api_key = env::var("API_KEY").expect("API_KEY not found");
-        let spice_client = Client::new(&api_key).await;
-        return spice_client;
+        Client::new(&api_key).await
     }
 
     #[tokio::test]
@@ -32,13 +31,13 @@ mod tests {
                             assert_eq!(batch.num_rows(), 10);
                         },
                         Err(e) => {
-                            assert!(false, "Error: {}", e)
+                            panic!("Error: {}", e)
                         },
                     };
                     }
                 }
                 Err(e) => {
-                    assert!(false, "Error: {}", e);
+                    panic!("Error: {}", e);
                 }
             };
     }
@@ -58,13 +57,13 @@ mod tests {
                             assert_eq!(batch.num_rows(), 10);
                         },
                         Err(e) => {
-                            assert!(false, "Error: {}", e)
+                            panic!("Error: {}", e)
                         }
                     };
                 }
             }
             Err(e) => {
-                assert!(false, "Error: {}", e);
+                panic!("Error: {}", e);
             }
         };
     }
@@ -82,11 +81,11 @@ mod tests {
                     while let Some(batch) = flight_data_stream.next().await {
                     match batch {
                         Ok(batch) => {
-                            num_batches = num_batches + 1;
-                            total_rows = total_rows + batch.num_rows();
+                            num_batches += 1;
+                            total_rows += batch.num_rows();
                         },
                         Err(e) => {
-                            assert!(false, "Error: {}", e)
+                            panic!("Error: {}", e)
                         },
                     };
                     }
@@ -94,7 +93,7 @@ mod tests {
                     assert_ne!(num_batches, 1);
                 }
                 Err(e) => {
-                    assert!(false, "Error: {}", e);
+                    panic!("Error: {}", e);
                 }
             };
     }
