@@ -85,10 +85,8 @@ impl SqlFlightClient {
         if self.api_key.split('|').collect::<String>().len() < 2 {
             return Err("Invalid API key format".into());
         }
-        match self.handshake("", &self.api_key.to_string()).await {
-            Err(e) => Err(e.into()),
-            Ok(_) => Ok(()),
-        }
+        self.handshake("", &self.api_key.to_string()).await?;
+        Ok(())
     }
 
     fn set_request_headers<T>(
@@ -119,8 +117,8 @@ impl SqlFlightClient {
     ) -> std::result::Result<FlightRecordBatchStream, Box<dyn Error>> {
         self.authenticate().await?;
 
-        let desciptor = FlightDescriptor::new_cmd(query.to_string());
-        let req = self.set_request_headers(desciptor.into_request())?;
+        let descriptor = FlightDescriptor::new_cmd(query.to_string());
+        let req = self.set_request_headers(descriptor.into_request())?;
 
         let info = self
             .client
