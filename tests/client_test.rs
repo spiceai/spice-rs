@@ -8,7 +8,9 @@ mod tests {
     async fn new_client() -> Client {
         dotenv::from_path(Path::new(".env.local")).ok();
         let api_key = env::var("API_KEY").expect("API_KEY not found");
-        Client::new(&api_key).await
+        Client::new(&api_key)
+            .await
+            .expect("Failed to create client")
     }
 
     #[tokio::test]
