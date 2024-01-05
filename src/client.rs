@@ -1,4 +1,9 @@
-use crate::{flight::SqlFlightClient, prices::PricesClient, tls::new_tls_flight_channel};
+use crate::{
+    config::{FIRECACHE_ADDR, FLIGHT_ADDR, HTTPS_ADDR},
+    flight::SqlFlightClient,
+    prices::PricesClient,
+    tls::new_tls_flight_channel,
+};
 use arrow_flight::decode::FlightRecordBatchStream;
 use std::error::Error;
 use tokio::join;
@@ -20,18 +25,14 @@ impl SpiceClientConfig {
     }
 
     pub async fn load_from_default() -> Result<SpiceClientConfig, Box<dyn Error>> {
-        let https_addr = "https://data.spiceai.io".to_string();
-        let flight_addr = "https://flight.spiceai.io".to_string();
-        let firecache_addr = "https://firecache.spiceai.io".to_string();
-
         match join!(
-            new_tls_flight_channel(flight_addr.clone()),
-            new_tls_flight_channel(firecache_addr.clone())
+            new_tls_flight_channel(FLIGHT_ADDR),
+            new_tls_flight_channel(FIRECACHE_ADDR)
         ) {
             (Err(e), _) => Err(e),
             (_, Err(e)) => Err(e),
             (Ok(flight_chan), Ok(firecache_chan)) => Ok(SpiceClientConfig::new(
-                https_addr,
+                HTTPS_ADDR.to_string(),
                 flight_chan,
                 firecache_chan,
             )),
@@ -46,15 +47,14 @@ pub struct SpiceClient {
 }
 
 impl SpiceClient {
-    pub async fn new(api_key: &str) -> Self {
-        let config = SpiceClientConfig::load_from_default()
-            .await
-            .expect("Error Loading Client Config");
-        Self {
+    pub async fn new(api_key: &str) -> Result<Self, Box<dyn Error>> {
+        let config = SpiceClientConfig::load_from_default().await?;
+
+        Ok(Self {
             flight: SqlFlightClient::new(config.flight_channel, api_key.to_string()),
             firecache: SqlFlightClient::new(config.firecache_channel, api_key.to_string()),
             prices: PricesClient::new(Some(config.https_addr), api_key.to_string()),
-        }
+        })
     }
 
     pub async fn query(&mut self, query: &str) -> Result<FlightRecordBatchStream, Box<dyn Error>> {

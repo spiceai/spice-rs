@@ -1,4 +1,5 @@
 use std::error::Error;
+use std::str::FromStr;
 use tonic::transport::channel::{ClientTlsConfig, Endpoint};
 use tonic::transport::Channel;
 
@@ -18,8 +19,8 @@ pub fn system_tls_certificate() -> Result<tonic::transport::Certificate, Box<dyn
     Ok(tonic::transport::Certificate::from_pem(concatenated_pems))
 }
 
-pub async fn new_tls_flight_channel(https_url: String) -> Result<Channel, Box<dyn Error>> {
-    let endpoint_result = Endpoint::from_shared(https_url.clone());
+pub async fn new_tls_flight_channel(https_url: &str) -> Result<Channel, Box<dyn Error>> {
+    let endpoint_result = Endpoint::from_str(https_url.clone());
     if endpoint_result.is_err() {
         return Err(endpoint_result
             .expect_err("Couldn't create endpoint")
