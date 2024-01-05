@@ -13,9 +13,9 @@ pub struct SpiceClientConfig {
 impl SpiceClientConfig {
     pub fn new(https_addr: String, flight_channel: Channel, firecache_channel: Channel) -> Self {
         SpiceClientConfig {
-            https_addr: https_addr,
-            flight_channel: flight_channel,
-            firecache_channel: firecache_channel,
+            https_addr,
+            flight_channel,
+            firecache_channel,
         }
     }
 
@@ -28,15 +28,13 @@ impl SpiceClientConfig {
             new_tls_flight_channel(flight_addr.clone()),
             new_tls_flight_channel(firecache_addr.clone())
         ) {
-            (Err(e), _) => return Err(e.into()),
-            (_, Err(e)) => return Err(e.into()),
-            (Ok(flight_chan), Ok(firecache_chan)) => {
-                return Ok(SpiceClientConfig::new(
-                    https_addr,
-                    flight_chan,
-                    firecache_chan,
-                ));
-            }
+            (Err(e), _) => Err(e),
+            (_, Err(e)) => Err(e),
+            (Ok(flight_chan), Ok(firecache_chan)) => Ok(SpiceClientConfig::new(
+                https_addr,
+                flight_chan,
+                firecache_chan,
+            )),
         }
     }
 }

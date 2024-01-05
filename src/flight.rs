@@ -31,7 +31,7 @@ fn status_to_arrow_error(status: tonic::Status) -> ArrowError {
 impl SqlFlightClient {
     pub fn new(chan: Channel, api_key: String) -> Self {
         SqlFlightClient {
-            api_key: api_key,
+            api_key,
             client: FlightServiceClient::new(chan),
             headers: HashMap::default(),
             token: None,
@@ -82,7 +82,7 @@ impl SqlFlightClient {
     }
 
     pub async fn authenticate(&mut self) -> std::result::Result<(), Box<dyn Error>> {
-        if self.api_key.split("|").collect::<String>().len() < 2 {
+        if self.api_key.split('|').collect::<String>().len() < 2 {
             return Err("Invalid API key format".into());
         }
         match self.handshake("", &self.api_key.to_string()).await {
@@ -117,10 +117,7 @@ impl SqlFlightClient {
         &mut self,
         query: &str,
     ) -> std::result::Result<FlightRecordBatchStream, Box<dyn Error>> {
-        match self.authenticate().await {
-            Err(e) => return Err(e.into()),
-            Ok(()) => {}
-        };
+        self.authenticate().await?;
 
         let desciptor = FlightDescriptor::new_cmd(query.to_string());
         let req = self.set_request_headers(desciptor.into_request())?;

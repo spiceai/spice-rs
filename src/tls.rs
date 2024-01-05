@@ -21,13 +21,15 @@ pub fn system_tls_certificate() -> Result<tonic::transport::Certificate, Box<dyn
 pub async fn new_tls_flight_channel(https_url: String) -> Result<Channel, Box<dyn Error>> {
     let endpoint_result = Endpoint::from_shared(https_url.clone());
     if endpoint_result.is_err() {
-        return Err(endpoint_result.err().expect("").into());
+        return Err(endpoint_result
+            .expect_err("Couldn't create endpoint")
+            .into());
     }
     let mut endpoint = endpoint_result.expect("");
 
     if https_url.starts_with("https://") {
         match system_tls_certificate() {
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(e),
             Ok(cert) => {
                 let tls_config = ClientTlsConfig::new()
                     .ca_certificate(cert)
