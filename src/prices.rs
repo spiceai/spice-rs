@@ -101,14 +101,10 @@ fn string_to_float_option<'de, D>(deserializer: D) -> Result<Option<f64>, D::Err
 where
     D: serde::Deserializer<'de>,
 {
-    let s: Option<String> = Option::deserialize(deserializer)?;
-    match s {
-        Some(str_val) => str_val
-            .parse::<f64>()
-            .map(Some)
-            .map_err(serde::de::Error::custom),
-        None => Ok(None),
-    }
+    Option::deserialize(deserializer)?
+        .map(|x: String| x.parse::<f64>())
+        .transpose()
+        .map_err(|x| serde::de::Error::custom(x.to_string()))
 }
 
 async fn map_reqwest_response<T: DeserializeOwned>(resp: Response) -> Result<T, Box<dyn Error>> {

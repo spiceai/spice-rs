@@ -23,15 +23,11 @@ pub async fn new_tls_flight_channel(https_url: &str) -> Result<Channel, Box<dyn 
     let mut endpoint = Endpoint::from_str(https_url)?;
 
     if https_url.starts_with("https://") {
-        match system_tls_certificate() {
-            Err(e) => return Err(e),
-            Ok(cert) => {
-                let tls_config = ClientTlsConfig::new()
-                    .ca_certificate(cert)
-                    .domain_name(https_url.trim_start_matches("https://"));
-                endpoint = endpoint.tls_config(tls_config)?;
-            }
-        }
+        let cert = system_tls_certificate()?;
+        let tls_config = ClientTlsConfig::new()
+            .ca_certificate(cert)
+            .domain_name(https_url.trim_start_matches("https://"));
+        endpoint = endpoint.tls_config(tls_config)?;
     }
 
     Ok(endpoint.connect().await?)
