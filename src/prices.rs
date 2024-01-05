@@ -6,6 +6,8 @@ use chrono::{DateTime, Utc};
 use reqwest::{Response, StatusCode};
 use serde::{de::DeserializeOwned, Deserialize};
 
+use crate::config::HTTPS_ADDR;
+
 #[derive(Debug, Deserialize)]
 pub struct HistoricalPriceData {
     pub timestamp: DateTime<Utc>,
@@ -130,7 +132,7 @@ pub struct PricesClient {
 
 impl PricesClient {
     pub fn new(base_url: Option<String>, api_key: String) -> Self {
-        let default_url = "https://data.spiceai.io".to_string();
+        let default_url = HTTPS_ADDR.to_string();
         let client = reqwest::Client::new();
         PricesClient {
             base_url: base_url.unwrap_or(default_url),
