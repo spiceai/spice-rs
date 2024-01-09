@@ -40,13 +40,9 @@ impl SpiceClientConfig {
     }
 }
 
-/// `SpiceClient` is the main client struct that holds PricesClient and methods to interact with Spice Flight endpoint.
-/// It provides convenience async methods `new`, `query` and `fire_query` for client operations.
-///
-/// # Struct Fields
-///
-/// * `prices`: PricesClient - Client interface for interacting with prices.
-///
+/// The SpiceClient is the main entry point for interacting with the Spice API.
+/// It provides methods for querying the Spice Flight and Firecache endpoints,
+/// as well as the Spice Prices endpoint.
 pub struct SpiceClient {
     flight: SqlFlightClient,
     firecache: SqlFlightClient,
@@ -60,7 +56,7 @@ impl SpiceClient {
     ///
     /// #[tokio::main]
     /// async fn main() {
-    ///     let client = Client::new("API_KEY").await.unwrap();
+    ///     let mut client = Client::new("API_KEY").await.unwrap();
     /// }
     /// ```
     pub async fn new(api_key: &str) -> Result<Self, Box<dyn Error>> {
