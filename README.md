@@ -16,7 +16,7 @@ spice-rs = { git = "https://github.com/spiceai/spice-rs", tag = "v1.0.2" }
 ### Arrow Query
 **SQL Query**
 
-```rust
+```rust,ignore
 use spice_rs::Client;
 
 let mut client = Client::new("API_KEY").await;
@@ -28,23 +28,24 @@ let data = client.query("SELECT * FROM eth.recent_blocks LIMIT 10;").await;
 
 Get the supported pairs:
 
-```rust
-let supported_pairs = client.prices.get_supported_pairs().await;
+```rust,ignore
+let supported_pairs = client.get_supported_pairs().await;
 ```
 
 Get the latest price for a token pair:
 
-```rust
-let price_data = client.prices.get_prices(&["BTC-USDC"]).await;
+```rust,ignore
+let price_data = client.get_prices(&["BTC-USDC"]).await;
 ```
 
 Get historical data:
 
-```rust
+```rust,ignore
 let now = Utc::now();
 let start = now.sub(Duration::seconds(3600));
 
-let historical_price_data = client.prices.get_historical_prices(&["BTC-USDC"], Some(start),Some(now), Option::None).await;
+let historical_price_data = client
+  .get_historical_prices(&["BTC-USDC"], Some(start), Some(now), Option::None).await;
 ```
 
 ## Documentation

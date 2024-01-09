@@ -75,13 +75,13 @@ impl SpiceClient {
 
     /// Queries the Spice Flight endpoint with the given SQL query.
     /// ```
-    /// use spice_rs::Client;
-    ///
-    /// #[tokio::main]
-    /// async fn main() {
-    ///   let mut client = Client::new("API_KEY").await.unwrap();
-    ///   let data = client.query("SELECT * FROM eth.recent_blocks LIMIT 10;").await;
-    /// }
+    /// # use spice_rs::Client;
+    /// #
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// #  let mut client = Client::new("API_KEY").await.unwrap();
+    /// let data = client.query("SELECT * FROM eth.recent_blocks LIMIT 10;").await;
+    /// # }
     /// ````
     pub async fn query(&mut self, query: &str) -> Result<FlightRecordBatchStream, Box<dyn Error>> {
         self.flight.query(query).await
@@ -89,13 +89,13 @@ impl SpiceClient {
 
     /// Queries the Spice Firecache endpoint with the given SQL query.
     /// ```
-    /// use spice_rs::Client;
-    ///
-    /// #[tokio::main]
-    /// async fn main() {
-    ///   let mut client = Client::new("API_KEY").await.unwrap();
-    ///   let data = client.fire_query("SELECT * FROM eth.recent_blocks LIMIT 10;").await;
-    /// }
+    /// # use spice_rs::Client;
+    /// #
+    /// #  #[tokio::main]
+    /// # async fn main() {
+    /// #  let mut client = Client::new("API_KEY").await.unwrap();
+    /// let data = client.fire_query("SELECT * FROM eth.recent_blocks LIMIT 10;").await;
+    /// # }
     /// ````
     pub async fn fire_query(
         &mut self,
@@ -106,13 +106,13 @@ impl SpiceClient {
 
     /// Get the supported pairs:
     /// ```rust
-    /// use spice_rs::Client;
-    ///
-    /// #[tokio::main]
-    /// async fn main() {
-    ///   let mut client = Client::new("API_KEY").await.unwrap();
-    ///   let supported_pairs = client.get_supported_pairs().await;
-    /// }
+    /// # use spice_rs::Client;
+    /// #
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// #  let mut client = Client::new("API_KEY").await.unwrap();
+    /// let supported_pairs = client.get_supported_pairs().await;
+    /// # }
     /// ```
     pub async fn get_supported_pairs(&self) -> Result<Vec<String>, Box<dyn Error>> {
         self.prices.get_supported_pairs().await
@@ -120,13 +120,13 @@ impl SpiceClient {
 
     /// Get the latest price for a token pair:
     /// ```rust
-    /// use spice_rs::Client;
-    ///
-    /// #[tokio::main]
-    /// async fn main() {
-    ///   let mut client = Client::new("API_KEY").await.unwrap();
-    ///   let price_data = client.get_prices(&["BTC-USDC"]).await;
-    /// }
+    /// # use spice_rs::Client;
+    /// #
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// #  let mut client = Client::new("API_KEY").await.unwrap();
+    /// let price_data = client.get_prices(&["BTC-USDC"]).await;
+    /// # }
     /// ```
     pub async fn get_prices(&self, pairs: &[&str]) -> Result<LatestPricesResponse, Box<dyn Error>> {
         self.prices.get_prices(pairs).await
@@ -134,19 +134,19 @@ impl SpiceClient {
 
     /// Get historical data:
     /// ```rust
-    /// use spice_rs::Client;
-    /// use chrono::Utc;
-    /// use chrono::Duration;
-    /// use std::ops::Sub;
-    ///
-    /// #[tokio::main]
-    /// async fn main() {
-    ///   let mut client = Client::new("API_KEY").await.unwrap();
-    ///   let now = Utc::now();
-    ///   let start = now.sub(Duration::seconds(3600));
-    ///   let historical_price_data = client
+    /// # use spice_rs::Client;
+    /// # use chrono::Utc;
+    /// # use chrono::Duration;
+    /// # use std::ops::Sub;
+    /// #
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// #  let mut client = Client::new("API_KEY").await.unwrap();
+    /// #  let now = Utc::now();
+    /// #  let start = now.sub(Duration::seconds(3600));
+    /// let historical_price_data = client
     ///     .get_historical_prices(&["BTC-USDC"], Some(start), Some(now), Option::None).await;
-    /// }
+    /// # }
     /// ```
     pub async fn get_historical_prices(
         &self,
