@@ -10,12 +10,39 @@ use base64::Engine;
 use bytes::Bytes;
 use futures::stream;
 use futures::TryStreamExt;
+use snafu::prelude::*;
 use std::collections::HashMap;
-use std::error::Error;
 use std::str::FromStr;
+use tonic::metadata::errors::InvalidMetadataValue;
 use tonic::metadata::AsciiMetadataKey;
 use tonic::transport::Channel;
 use tonic::IntoRequest;
+
+#[derive(Debug, Snafu)]
+pub enum Error {
+    #[snafu(display("Something bad happened"))]
+    Generic {
+        source: Box<dyn std::error::Error + Send>,
+    },
+
+    Arrow {
+        source: ArrowError,
+    },
+
+    Status {
+        source: tonic::Status,
+    },
+
+    InvalidAPIKeyFormat,
+
+    InvalidMetadata {
+        source: InvalidMetadataValue,
+    },
+
+    NoEndpointsFound,
+}
+
+pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 pub struct SqlFlightClient {
     token: Option<String>,
@@ -24,8 +51,8 @@ pub struct SqlFlightClient {
     api_key: String,
 }
 
-fn status_to_arrow_error(status: tonic::Status) -> ArrowError {
-    ArrowError::IpcError(format!("{status:?}"))
+fn status_to_error(status: tonic::Status) -> Error {
+    Error::Status { source: status }
 }
 
 impl SqlFlightClient {
@@ -38,7 +65,7 @@ impl SqlFlightClient {
         }
     }
 
-    async fn handshake(&mut self, username: &str, password: &str) -> Result<Bytes, ArrowError> {
+    async fn handshake(&mut self, username: &str, password: &str) -> Result<Bytes> {
         let cmd = HandshakeRequest {
             protocol_version: 0,
             payload: Default::default(),
@@ -47,21 +74,24 @@ impl SqlFlightClient {
         let val = BASE64_STANDARD.encode(format!("{username}:{password}"));
         let val = format!("Basic {val}")
             .parse()
-            .map_err(|_| ArrowError::ParseError("Cannot parse header".to_string()))?;
+            .context(InvalidMetadataSnafu)?;
         req.metadata_mut().insert("authorization", val);
-        let req = self.set_request_headers(req)?;
+        let req = self.set_request_headers(req).context(ArrowSnafu)?;
         let resp = self
             .client
             .handshake(req)
             .await
-            .map_err(|e| ArrowError::IpcError(format!("Can't handshake {e}")))?;
+            .map_err(|e| ArrowError::IpcError(format!("Can't handshake {e}")))
+            .context(ArrowSnafu)?;
         if let Some(auth) = resp.metadata().get("authorization") {
             let auth = auth
                 .to_str()
-                .map_err(|_| ArrowError::ParseError("Can't read auth header".to_string()))?;
+                .map_err(|_| ArrowError::ParseError("Can't read auth header".to_string()))
+                .context(ArrowSnafu)?;
             let bearer = "Bearer ";
             if !auth.starts_with(bearer) {
-                Err(ArrowError::ParseError("Invalid auth header!".to_string()))?;
+                Err(ArrowError::ParseError("Invalid auth header!".to_string()))
+                    .context(ArrowSnafu)?;
             }
             let auth = auth[bearer.len()..].to_string();
             self.token = Some(auth);
@@ -70,20 +100,22 @@ impl SqlFlightClient {
             .into_inner()
             .try_collect()
             .await
-            .map_err(|_| ArrowError::ParseError("Can't collect responses".to_string()))?;
+            .map_err(|_| ArrowError::ParseError("Can't collect responses".to_string()))
+            .context(ArrowSnafu)?;
         let resp = match responses.as_slice() {
             [resp] => resp.payload.clone(),
             [] => Bytes::new(),
             _ => Err(ArrowError::ParseError(
                 "Multiple handshake responses".to_string(),
-            ))?,
+            ))
+            .context(ArrowSnafu)?,
         };
         Ok(resp)
     }
 
-    async fn authenticate(&mut self) -> std::result::Result<(), Box<dyn Error>> {
+    async fn authenticate(&mut self) -> Result<()> {
         if self.api_key.split('|').collect::<String>().len() < 2 {
-            return Err("Invalid API key format".into());
+            return InvalidAPIKeyFormatSnafu.fail();
         }
         self.handshake("", &self.api_key.to_string()).await?;
         Ok(())
@@ -111,31 +143,30 @@ impl SqlFlightClient {
         Ok(req)
     }
 
-    pub async fn query(
-        &mut self,
-        query: &str,
-    ) -> std::result::Result<FlightRecordBatchStream, Box<dyn Error>> {
+    pub async fn query(&mut self, query: &str) -> Result<FlightRecordBatchStream> {
         self.authenticate().await?;
 
         let descriptor = FlightDescriptor::new_cmd(query.to_string());
-        let req = self.set_request_headers(descriptor.into_request())?;
+        let req = self
+            .set_request_headers(descriptor.into_request())
+            .context(ArrowSnafu)?;
 
         let info = self
             .client
             .get_flight_info(req)
             .await
-            .map_err(status_to_arrow_error)?
+            .map_err(status_to_error)?
             .into_inner();
 
         for ep in info.endpoint {
             if let Some(tkt) = ep.ticket {
                 let req = tkt.into_request();
-                let req = self.set_request_headers(req)?;
+                let req = self.set_request_headers(req).context(ArrowSnafu)?;
                 let (md, response_stream, _ext) = self
                     .client
                     .do_get(req)
                     .await
-                    .map_err(status_to_arrow_error)?
+                    .map_err(status_to_error)?
                     .into_parts();
 
                 return Ok(FlightRecordBatchStream::new_from_flight_data(
@@ -144,6 +175,6 @@ impl SqlFlightClient {
                 .with_headers(md));
             }
         }
-        Err("No endpoints found".into())
+        NoEndpointsFoundSnafu.fail()
     }
 }

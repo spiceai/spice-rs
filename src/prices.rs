@@ -1,5 +1,5 @@
+use snafu::prelude::*;
 use std::collections::HashMap;
-use std::error::Error;
 use std::fmt;
 
 use chrono::{DateTime, Utc};
@@ -7,6 +7,28 @@ use reqwest::{Response, StatusCode};
 use serde::{de::DeserializeOwned, Deserialize};
 
 use crate::config::HTTPS_ADDR;
+
+#[derive(Debug, Snafu)]
+pub enum Error {
+    #[snafu(display("Something bad happened"))]
+    Generic {
+        source: Box<dyn std::error::Error + Send>,
+    },
+
+    Request {
+        source: reqwest::Error,
+    },
+
+    BadRequest,
+
+    RateLimitExceeded,
+
+    InternalServerError,
+
+    UnexpectedResponse,
+}
+
+pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug, Deserialize)]
 pub struct HistoricalPriceData {
@@ -107,16 +129,16 @@ where
         .map_err(|x| serde::de::Error::custom(x.to_string()))
 }
 
-async fn map_reqwest_response<T: DeserializeOwned>(resp: Response) -> Result<T, Box<dyn Error>> {
+async fn map_reqwest_response<T: DeserializeOwned>(resp: Response) -> Result<T> {
     match resp.status() {
         StatusCode::OK => {
-            let response: T = resp.json().await?;
+            let response: T = resp.json().await.context(RequestSnafu)?;
             Ok(response)
         }
-        StatusCode::BAD_REQUEST => Err("Bad request".into()),
-        StatusCode::TOO_MANY_REQUESTS => Err("Rate limit exceeded, slow down".into()),
-        StatusCode::INTERNAL_SERVER_ERROR => Err("Internal server error".into()),
-        _ => Err(format!("Unexpected response status: {}", resp.status()).into()),
+        StatusCode::BAD_REQUEST => BadRequestSnafu.fail(),
+        StatusCode::TOO_MANY_REQUESTS => RateLimitExceededSnafu.fail(),
+        StatusCode::INTERNAL_SERVER_ERROR => InternalServerSnafu.fail(),
+        _ => UnexpectedResponseSnafu.fail(),
     }
 }
 
@@ -144,55 +166,55 @@ impl PricesClient {
             .header("User-Agent", "spice-rs 1.0")
     }
 
-    pub async fn get_supported_pairs(&self) -> Result<Vec<String>, Box<dyn Error>> {
-        let url = format!("{}/v1/prices/pairs", self.base_url);
-        let request = self.client.get(&url);
-        let response: Vec<String> = self.add_headers(request).send().await?.json().await?;
-        Ok(response)
-    }
+    // pub async fn get_supported_pairs(&self) -> Result<Vec<String>> {
+    //     let url = format!("{}/v1/prices/pairs", self.base_url);
+    //     let request = self.client.get(&url);
+    //     let response: Vec<String> = self.add_headers(request).send().await?.json().await?;
+    //     Ok(response)
+    // }
 
-    pub async fn get_prices(&self, pairs: &[&str]) -> Result<LatestPricesResponse, Box<dyn Error>> {
-        let url = format!("{}/v1/prices?pairs={}", self.base_url, pairs.join(","));
+    // pub async fn get_prices(&self, pairs: &[&str]) -> Result<LatestPricesResponse> {
+    //     let url = format!("{}/v1/prices?pairs={}", self.base_url, pairs.join(","));
 
-        self.add_headers(self.client.get(&url))
-            .send()
-            .await
-            .map(map_reqwest_response)?
-            .await
-    }
+    //     self.add_headers(self.client.get(&url))
+    //         .send()
+    //         .await
+    //         .map(map_reqwest_response)?
+    //         .await
+    // }
 
-    pub async fn get_historical_prices(
-        &self,
-        pairs: &[&str],
-        start: Option<DateTime<Utc>>,
-        end: Option<DateTime<Utc>>,
-        granularity: Option<&str>,
-    ) -> Result<HashMap<String, Vec<HistoricalPriceData>>, Box<dyn Error>> {
-        let mut url = format!(
-            "{}/v1/prices/historical?pairs={}",
-            self.base_url,
-            pairs.join(",")
-        );
+    // pub async fn get_historical_prices(
+    //     &self,
+    //     pairs: &[&str],
+    //     start: Option<DateTime<Utc>>,
+    //     end: Option<DateTime<Utc>>,
+    //     granularity: Option<&str>,
+    // ) -> Result<HashMap<String, Vec<HistoricalPriceData>>> {
+    //     let mut url = format!(
+    //         "{}/v1/prices/historical?pairs={}",
+    //         self.base_url,
+    //         pairs.join(",")
+    //     );
 
-        if let Some(start_time) = start {
-            let timestamp = start_time.timestamp();
-            url.push_str(&format!("&start={}", timestamp));
-        }
+    //     if let Some(start_time) = start {
+    //         let timestamp = start_time.timestamp();
+    //         url.push_str(&format!("&start={}", timestamp));
+    //     }
 
-        if let Some(end_time) = end {
-            let timestamp = end_time.timestamp();
-            url.push_str(&format!("&end={}", timestamp));
-        }
+    //     if let Some(end_time) = end {
+    //         let timestamp = end_time.timestamp();
+    //         url.push_str(&format!("&end={}", timestamp));
+    //     }
 
-        if let Some(gran) = granularity {
-            url.push_str(&format!("&granularity={}", gran));
-        }
+    //     if let Some(gran) = granularity {
+    //         url.push_str(&format!("&granularity={}", gran));
+    //     }
 
-        println!("URL: {}", url);
-        self.add_headers(self.client.get(&url))
-            .send()
-            .await
-            .map(map_reqwest_response)?
-            .await
-    }
+    //     println!("URL: {}", url);
+    //     self.add_headers(self.client.get(&url))
+    //         .send()
+    //         .await
+    //         .map(map_reqwest_response)?
+    //         .await
+    // }
 }
