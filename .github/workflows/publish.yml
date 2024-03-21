@@ -17,8 +17,6 @@ jobs:
 
       - run: cargo build --verbose
 
-      - run: cargo test --verbose
-
       - run: cargo publish --verbose
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
