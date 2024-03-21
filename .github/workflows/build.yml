@@ -1,0 +1,37 @@
+name: build
+
+on:
+  push:
+    branches: ['trunk']
+  pull_request:
+    branches: ['trunk']
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build_and_test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        toolchain:
+          - stable
+          - beta
+          - nightly
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Update Rust
+        run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }}
+
+      - name: Build
+        run: cargo build --verbose
+
+      - name: Run clippy
+        run: cargo clippy --verbose --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo test --verbose
+        env:
+          API_KEY: ${{ secrets.TEST_API_KEY }}
