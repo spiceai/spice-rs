@@ -12,8 +12,12 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - name: Run update
-        run: rustup update && rustup default
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
 
       - run: cargo build --verbose
 
