@@ -40,9 +40,10 @@ impl SpiceClientConfig {
     }
 }
 
-/// The SpiceClient is the main entry point for interacting with the Spice API.
+/// The `SpiceClient` is the main entry point for interacting with the Spice API.
 /// It provides methods for querying the Spice Flight and Firecache endpoints,
 /// as well as the Spice Prices endpoint.
+#[allow(clippy::module_name_repetitions)]
 pub struct SpiceClient {
     flight: SqlFlightClient,
     firecache: SqlFlightClient,
@@ -50,7 +51,7 @@ pub struct SpiceClient {
 }
 
 impl SpiceClient {
-    /// Creates a new SpiceClient with the given API key.
+    /// Creates a new `SpiceClient` with the given API key.
     /// ```
     /// use spiceai::Client;
     ///
