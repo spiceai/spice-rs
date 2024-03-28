@@ -4,7 +4,7 @@ Rust SDK for Spice.ai
 
 ## Installation
 
-Add `spiceai` crate:
+Add Spice SDK
 
 ```bash
 cargo add spiceai
