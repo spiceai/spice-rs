@@ -1,13 +1,14 @@
 #[cfg(test)]
+use spiceai::ClientBuilder;
+
 mod tests {
-    use chrono::{Duration, Utc};
     use spiceai::*;
     use std::env;
-    use std::ops::Sub;
     use std::path::Path;
 
     #[tokio::test]
-    async fn test_readme() {
+    #[allow(deprecated)]
+    async fn test_readme_new() {
         // NOTE: If you're changing the code below, make sure you update the README.md.
         dotenv::from_path(Path::new(".env.local")).ok();
         let api_key = env::var("API_KEY").expect("API_KEY not found");
@@ -16,6 +17,42 @@ mod tests {
         let data = client
             .query("SELECT * FROM eth.recent_blocks LIMIT 10;")
             .await;
+        if data.is_err() {
+            panic!("failed to query: {:#?}", data.expect_err(""))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_readme_builder() {
+        // NOTE: If you're changing the code below, make sure you update the README.md.
+        dotenv::from_path(Path::new(".env.local")).ok();
+        let api_key = env::var("API_KEY").expect("API_KEY not found");
+
+        let mut client = ClientBuilder::new()
+            .with_api_key(&api_key)
+            .with_spiceai_cloud()
+            .build()
+            .await
+            .unwrap();
+
+        let data = client
+            .query("SELECT * FROM eth.recent_blocks LIMIT 10;")
+            .await;
+        if data.is_err() {
+            panic!("failed to query: {:#?}", data.expect_err(""))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_readme_builder_local() {
+        // NOTE: If you're changing the code below, make sure you update the README.md.
+        let mut client = ClientBuilder::new()
+            .with_flight_url("http://localhost:50051")
+            .build()
+            .await
+            .unwrap();
+
+        let data = client.query("select * from taxi_trips limit 3;").await;
         if data.is_err() {
             panic!("failed to query: {:#?}", data.expect_err(""))
         }
