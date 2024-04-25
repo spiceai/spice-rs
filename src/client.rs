@@ -91,9 +91,21 @@ impl SpiceClient {
     }
 }
 
+/// Builder for creating a `SpiceClient`.
+///
+/// ```
+/// # use spiceai::ClientBuilder;
+/// #
+/// # #[tokio::main]
+/// # async fn main() {
+/// #    let mut client = ClientBuilder::new()
+/// #      .with_api_key("API_KEY")
+/// #      .with_spiceai_cloud()
+/// #      .build();
+/// # }
+/// ```
 pub struct SpiceClientBuilder {
     api_key: Option<String>,
-    // http_url: Option<String>,
     firecache_url: Option<String>,
     flight_url: Option<String>,
 }
@@ -104,38 +116,42 @@ impl Default for SpiceClientBuilder {
     }
 }
 
-/// A builder for creating a `SpiceClient`.
 impl SpiceClientBuilder {
     pub fn new() -> Self {
         Self {
             api_key: None,
-            // http_url: None,
             firecache_url: None,
             flight_url: None,
         }
     }
 
+    /// Configures the `SpiceClient` to use the given API key.
     pub fn with_api_key(mut self, api_key: &str) -> Self {
         self.api_key = Some(api_key.to_string());
         self
     }
 
+    /// Configures the `SpiceClient` to use the given Spice Firecache endpoint.
     pub fn with_firecache_url(mut self, firecache_url: &str) -> Self {
         self.firecache_url = Some(firecache_url.to_string());
         self
     }
 
+    /// Configures the `SpiceClient` to use the given Spice Flight endpoint.
     pub fn with_flight_url(mut self, flight_url: &str) -> Self {
         self.flight_url = Some(flight_url.to_string());
         self
     }
 
+    /// Configures the `SpiceClient` to use default Spice.ai Cloud endpoints.
+    /// Equals to calling `.with_firecache_url("https://firecache.spiceai.io")` and `.with_flight_url("https://flight.spiceai.io")`.
     pub fn with_spiceai_cloud(mut self) -> Self {
         self.flight_url = Some(SPICE_CLOUD_FLIGHT_ADDR.to_string());
         self.firecache_url = Some(SPICE_CLOUD_FIRECACHE_ADDR.to_string());
         self
     }
 
+    /// Builds the `SpiceClient` with the specified configuration.
     pub async fn build(self) -> Result<SpiceClient, Box<dyn Error>> {
         let flight_channel = match self.flight_url {
             Some(url) => new_tls_flight_channel(&url).await?,
