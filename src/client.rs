@@ -93,6 +93,18 @@ impl SpiceClient {
 
 /// Builder for creating a `SpiceClient`.
 ///
+/// By default the `SpiceClient` will use local spice runtime flight endpoint.
+/// Follow [spiceai quickstart](https://github.com/spiceai/spiceai?tab=readme-ov-file#%EF%B8%8F-quickstart-local-machine) to setup local spice runtime.
+/// ```
+/// # use spiceai::ClientBuilder;
+/// #
+/// # #[tokio::main]
+/// # async fn main() {
+/// #    let mut client = ClientBuilder::new().build();
+/// # }
+/// ```
+/// To use default Spice.ai Cloud endpoints, you can use the `with_spiceai_cloud()` method.
+///
 /// ```
 /// # use spiceai::ClientBuilder;
 /// #
@@ -104,6 +116,7 @@ impl SpiceClient {
 /// #      .build();
 /// # }
 /// ```
+///
 pub struct SpiceClientBuilder {
     api_key: Option<String>,
     firecache_url: Option<String>,

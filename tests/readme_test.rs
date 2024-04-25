@@ -44,11 +44,7 @@ mod tests {
     #[tokio::test]
     async fn test_readme_builder_local() {
         // NOTE: If you're changing the code below, make sure you update the README.md.
-        let mut client = ClientBuilder::new()
-            .with_flight_url("http://localhost:50051")
-            .build()
-            .await
-            .unwrap();
+        let mut client = ClientBuilder::new().build().await.unwrap();
 
         let data = client.query("select * from taxi_trips limit 3;").await;
         if data.is_err() {
