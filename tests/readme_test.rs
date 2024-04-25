@@ -1,6 +1,4 @@
 #[cfg(test)]
-use spiceai::ClientBuilder;
-
 mod tests {
     use spiceai::*;
     use std::env;
