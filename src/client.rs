@@ -100,7 +100,10 @@ impl SpiceClient {
 /// #
 /// # #[tokio::main]
 /// # async fn main() {
-/// #    let mut client = ClientBuilder::new().build();
+/// #    let mut client = ClientBuilder::new()
+/// #      .build();
+/// #      .await
+/// #      .unwrap();
 /// # }
 /// ```
 /// To use default Spice.ai Cloud endpoints, you can use the `with_spiceai_cloud()` method.
@@ -114,6 +117,8 @@ impl SpiceClient {
 /// #      .with_api_key("API_KEY")
 /// #      .with_spiceai_cloud()
 /// #      .build();
+/// #      .await
+/// #      .unwrap();
 /// # }
 /// ```
 ///
