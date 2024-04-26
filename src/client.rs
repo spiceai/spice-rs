@@ -139,7 +139,7 @@ impl SpiceClientBuilder {
     }
 
     /// Configures the `SpiceClient` to use the given API key.
-    pub fn with_api_key(mut self, api_key: &str) -> Self {
+    pub fn api_key(mut self, api_key: &str) -> Self {
         self.api_key = Some(api_key.to_string());
         self
     }
