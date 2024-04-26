@@ -104,7 +104,7 @@ impl SpiceClient {
 /// # #[tokio::main]
 /// # async fn main() {
 /// #    let mut client = ClientBuilder::new()
-/// #      .build();
+/// #      .build()
 /// #      .await
 /// #      .unwrap();
 /// # }
@@ -119,7 +119,7 @@ impl SpiceClient {
 /// #    let mut client = ClientBuilder::new()
 /// #      .api_key("API_KEY")
 /// #      .use_spiceai_cloud()
-/// #      .build();
+/// #      .build()
 /// #      .await
 /// #      .unwrap();
 /// # }
