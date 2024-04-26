@@ -158,7 +158,7 @@ impl SpiceClientBuilder {
 
     /// Configures the `SpiceClient` to use default Spice.ai Cloud endpoints.
     /// Equivalent to calling `.with_firecache_url("https://firecache.spiceai.io")` and `.with_flight_url("https://flight.spiceai.io")`.
-    pub fn with_spiceai_cloud(mut self) -> Self {
+    pub fn use_spiceai_cloud(mut self) -> Self {
         self.flight_url = Some(SPICE_CLOUD_FLIGHT_ADDR.to_string());
         self.firecache_url = Some(SPICE_CLOUD_FIRECACHE_ADDR.to_string());
         self
