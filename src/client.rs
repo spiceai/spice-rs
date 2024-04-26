@@ -49,7 +49,6 @@ impl SpiceClient {
     ///     let mut client = Client::new("API_KEY").await.unwrap();
     /// }
     /// ```
-    #[deprecated(note = "Use spiceai::ClientBuilder instead")]
     pub async fn new(api_key: &str) -> Result<Self, Box<dyn Error>> {
         let config = SpiceClientConfig::load_from_default().await?;
 
@@ -57,6 +56,10 @@ impl SpiceClient {
             flight: SqlFlightClient::new(config.flight_channel, Some(api_key.to_string())),
             firecache: SqlFlightClient::new(config.firecache_channel, Some(api_key.to_string())),
         })
+    }
+
+    pub fn builder() -> SpiceClientBuilder {
+        SpiceClientBuilder::new()
     }
 
     /// Queries the Spice Flight endpoint with the given SQL query.
