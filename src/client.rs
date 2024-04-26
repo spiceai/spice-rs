@@ -151,7 +151,7 @@ impl SpiceClientBuilder {
     }
 
     /// Configures the `SpiceClient` to use the given Spice Flight endpoint.
-    pub fn with_flight_url(mut self, flight_url: &str) -> Self {
+    pub fn flight_url(mut self, flight_url: &str) -> Self {
         self.flight_url = Some(flight_url.to_string());
         self
     }
