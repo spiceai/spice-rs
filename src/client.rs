@@ -145,7 +145,7 @@ impl SpiceClientBuilder {
     }
 
     /// Configures the `SpiceClient` to use the given Spice Firecache endpoint.
-    pub fn with_firecache_url(mut self, firecache_url: &str) -> Self {
+    pub fn firecache_url(mut self, firecache_url: &str) -> Self {
         self.firecache_url = Some(firecache_url.to_string());
         self
     }
