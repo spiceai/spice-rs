@@ -115,7 +115,8 @@ impl SqlFlightClient {
         &mut self,
         query: &str,
     ) -> std::result::Result<FlightRecordBatchStream, Box<dyn Error>> {
-        if let Some(api_key) = api_key.as_ref() {
+        let api_key = self.api_key.clone();
+        if let Some(api_key) = api_key {
             self.authenticate(&api_key).await?;
         }
 

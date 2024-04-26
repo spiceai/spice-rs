@@ -24,7 +24,7 @@ use spiceai::ClientBuilder;
 #[tokio::main]
 async fn main() {
   let mut client = ClientBuilder::new()
-    .with_flight_url("http://localhost:50051")
+    .flight_url("http://localhost:50051")
     .build()
     .await
     .unwrap();
@@ -41,8 +41,8 @@ use spiceai::ClientBuilder;
 #[tokio::main]
 async fn main() {
   let mut client = ClientBuilder::new()
-    .with_api_key("API_KEY")
-    .with_spiceai_cloud()
+    .api_key("API_KEY")
+    .use_spiceai_cloud()
     .build()
     .await
     .unwrap();
@@ -59,8 +59,8 @@ use spiceai::ClientBuilder;
 #[tokio::main]
 async fn main() {
   let mut client = ClientBuilder::new()
-    .with_api_key("API_KEY")
-    .with_spiceai_cloud()
+    .api_key("API_KEY")
+    .use_spiceai_cloud()
     .build()
     .await
     .unwrap();
@@ -80,8 +80,8 @@ use spiceai::ClientBuilder;
 #[tokio::main]
 async fn main() {
   let mut client = ClientBuilder::new()
-    .with_api_key("API_KEY")
-    .with_spiceai_cloud()
+    .api_key("API_KEY")
+    .use_spiceai_cloud()
     .build()
     .await
     .unwrap();

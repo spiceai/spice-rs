@@ -9,8 +9,8 @@ mod tests {
         dotenv::from_path(Path::new(".env.local")).ok();
         let api_key = env::var("API_KEY").expect("API_KEY not found");
         ClientBuilder::new()
-            .with_api_key(&api_key)
-            .with_spiceai_cloud()
+            .api_key(&api_key)
+            .use_spiceai_cloud()
             .build()
             .await
             .expect("Failed to create client")

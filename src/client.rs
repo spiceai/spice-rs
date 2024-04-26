@@ -114,8 +114,8 @@ impl SpiceClient {
 /// # #[tokio::main]
 /// # async fn main() {
 /// #    let mut client = ClientBuilder::new()
-/// #      .with_api_key("API_KEY")
-/// #      .with_spiceai_cloud()
+/// #      .api_key("API_KEY")
+/// #      .use_spiceai_cloud()
 /// #      .build();
 /// #      .await
 /// #      .unwrap();
@@ -162,7 +162,7 @@ impl SpiceClientBuilder {
     }
 
     /// Configures the `SpiceClient` to use default Spice.ai Cloud endpoints.
-    /// Equivalent to calling `.with_firecache_url("https://firecache.spiceai.io")` and `.with_flight_url("https://flight.spiceai.io")`.
+    /// Equivalent to calling `.firecache_url("https://firecache.spiceai.io")` and `.flight_url("https://flight.spiceai.io")`.
     pub fn use_spiceai_cloud(mut self) -> Self {
         self.flight_url = Some(SPICE_CLOUD_FLIGHT_ADDR.to_string());
         self.firecache_url = Some(SPICE_CLOUD_FIRECACHE_ADDR.to_string());
