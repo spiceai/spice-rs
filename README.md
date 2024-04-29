@@ -24,7 +24,7 @@ use spiceai::ClientBuilder;
 #[tokio::main]
 async fn main() {
   let mut client = ClientBuilder::new()
-    .flight_url("http://localhost:50051")
+    .flight_url("grpc://localhost:50051")
     .build()
     .await
     .unwrap();
