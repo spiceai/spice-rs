@@ -21,13 +21,19 @@ fn get_os_release() -> Result<String, Box<dyn std::error::Error>> {
 
 pub(crate) fn get_user_agent() -> String {
     let os_type = std::env::consts::OS;
-    let os_type = if os_type.is_empty() {
-        "unknown".to_string()
-    } else {
-        // capitalize first letter
-        let mut os_type = os_type.to_string();
-        os_type[..1].make_ascii_uppercase();
-        os_type
+    let os_type = match os_type {
+        "" => "unknown".to_string(),
+        "macos" => "macOS".to_string(),
+        "linux" => "Linux".to_string(),
+        "windows" => "Windows".to_string(),
+        "ios" => "iOS".to_string(),
+        "android" => "Android".to_string(),
+        "freebsd" => "FreeBSD".to_string(),
+        "dragonfly" => "DragonFlyBSD".to_string(),
+        "netbsd" => "NetBSD".to_string(),
+        "openbsd" => "OpenBSD".to_string(),
+        "solaris" => "Solaris".to_string(),
+        _ => os_type.to_string(),      
     };
 
     let os_arch = std::env::consts::ARCH;

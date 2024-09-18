@@ -51,6 +51,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
+        fail-fast: false
         os: [ubuntu-latest, macos-latest, windows-latest]
         toolchain:
           - stable
