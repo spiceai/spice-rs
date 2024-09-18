@@ -1,3 +1,4 @@
+use crate::config::get_user_agent;
 use arrow::error::ArrowError;
 use arrow_flight::decode::FlightRecordBatchStream;
 use arrow_flight::error::FlightError;
@@ -24,16 +25,20 @@ pub struct SqlFlightClient {
     api_key: Option<String>,
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn status_to_arrow_error(status: tonic::Status) -> ArrowError {
     ArrowError::IpcError(format!("{status:?}"))
 }
 
 impl SqlFlightClient {
     pub fn new(chan: Channel, api_key: Option<String>) -> Self {
+        let mut headers = HashMap::new();
+        headers.insert("x-spice-user-agent".to_string(), get_user_agent());
+
         SqlFlightClient {
             api_key,
+            headers,
             client: FlightServiceClient::new(chan),
-            headers: HashMap::default(),
             token: None,
         }
     }
@@ -41,7 +46,7 @@ impl SqlFlightClient {
     async fn handshake(&mut self, username: &str, password: &str) -> Result<Bytes, ArrowError> {
         let cmd = HandshakeRequest {
             protocol_version: 0,
-            payload: Default::default(),
+            payload: Bytes::default(),
         };
         let mut req = tonic::Request::new(stream::iter(vec![cmd]));
         let val = BASE64_STANDARD.encode(format!("{username}:{password}"));

@@ -3,3 +3,67 @@ pub const SPICE_CLOUD_FIRECACHE_ADDR: &str = "https://firecache.spiceai.io";
 
 // default address for local spice runtime
 pub const SPICE_LOCAL_FLIGHT_ADDR: &str = "http://localhost:50051";
+
+#[cfg(target_family = "unix")]
+fn get_os_release() -> Result<String, Box<dyn std::error::Error>> {
+    // call uname -r to get release text
+    use std::process::Command;
+    let output = Command::new("uname").arg("-r").output()?;
+    let release = String::from_utf8(output.stdout)?;
+
+    Ok(release)
+}
+
+#[cfg(target_family = "windows")]
+fn get_os_release() -> Result<String, Box<dyn std::error::Error>> {
+    todo!("get_os_release not implemented for Windows")
+}
+
+pub(crate) fn get_user_agent() -> String {
+    let os_type = std::env::consts::OS;
+    let os_type = if os_type.is_empty() {
+        "unknown".to_string()
+    } else {
+        // capitalize first letter
+        let mut os_type = os_type.to_string();
+        os_type[..1].make_ascii_uppercase();
+        os_type
+    };
+
+    let os_arch = std::env::consts::ARCH;
+    let os_arch = match os_arch {
+        "" => "unknown".to_string(),
+        "x86" => "i386".to_string(),
+        _ => os_arch.to_string(),
+    };
+
+    let os_release = get_os_release()
+        .unwrap_or_else(|_| "unknown".to_string())
+        .trim()
+        .to_string();
+
+    format!(
+        "spice-rs {} ({os_type}/{os_release} {os_arch})",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_get_user_agent() {
+        let matching_regex = regex::Regex::new(
+            r"spice-rs \d+\.\d+\.\d+ \((Linux|Windows|macOS)/[\d\w\.\-\_]+ (x86_64|aarch64|i386)\)",
+        )
+        .expect("regex should be constructed");
+
+        let user_agent = get_user_agent();
+        let agent_matches = matching_regex.is_match(&user_agent);
+        assert!(
+            agent_matches,
+            "expected user agent to match regex, but got {user_agent}"
+        );
+    }
+}
