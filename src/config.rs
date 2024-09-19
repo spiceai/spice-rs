@@ -4,8 +4,10 @@ pub const SPICE_CLOUD_FIRECACHE_ADDR: &str = "https://firecache.spiceai.io";
 // default address for local spice runtime
 pub const SPICE_LOCAL_FLIGHT_ADDR: &str = "http://localhost:50051";
 
+pub type GenericError = Box<dyn std::error::Error + Send + Sync>;
+
 #[cfg(target_family = "unix")]
-fn get_os_release() -> Result<String, Box<dyn std::error::Error>> {
+fn get_os_release() -> Result<String, GenericError> {
     // call uname -r to get release text
     use std::process::Command;
     let output = Command::new("uname").arg("-r").output()?;
@@ -15,7 +17,7 @@ fn get_os_release() -> Result<String, Box<dyn std::error::Error>> {
 }
 
 #[cfg(target_family = "windows")]
-fn get_os_release() -> Result<String, Box<dyn std::error::Error>> {
+fn get_os_release() -> Result<String, GenericError> {
     use winver::WindowsVersion;
     if let Some(version) = WindowsVersion::detect() {
         Ok(version.to_string())

@@ -1,4 +1,5 @@
 use crate::config::get_user_agent;
+use crate::config::GenericError;
 use arrow::error::ArrowError;
 use arrow_flight::decode::FlightRecordBatchStream;
 use arrow_flight::error::FlightError;
@@ -12,7 +13,6 @@ use bytes::Bytes;
 use futures::stream;
 use futures::TryStreamExt;
 use std::collections::HashMap;
-use std::error::Error;
 use std::str::FromStr;
 use tonic::metadata::AsciiMetadataKey;
 use tonic::transport::Channel;
@@ -86,7 +86,7 @@ impl SqlFlightClient {
         Ok(resp)
     }
 
-    async fn authenticate(&mut self, api_key: &str) -> std::result::Result<(), Box<dyn Error>> {
+    async fn authenticate(&mut self, api_key: &str) -> std::result::Result<(), GenericError> {
         if api_key.split('|').collect::<String>().len() < 2 {
             return Err("Invalid API key format".into());
         }
@@ -119,7 +119,7 @@ impl SqlFlightClient {
     pub async fn query(
         &mut self,
         query: &str,
-    ) -> std::result::Result<FlightRecordBatchStream, Box<dyn Error>> {
+    ) -> std::result::Result<FlightRecordBatchStream, GenericError> {
         let api_key = self.api_key.clone();
         if let Some(api_key) = api_key {
             self.authenticate(&api_key).await?;
