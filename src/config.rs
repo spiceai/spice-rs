@@ -17,8 +17,11 @@ fn get_os_release() -> Result<String, Box<dyn std::error::Error>> {
 #[cfg(target_family = "windows")]
 fn get_os_release() -> Result<String, Box<dyn std::error::Error>> {
     use winver::WindowsVersion;
-    let version = WindowsVersion::get()?;
-    Ok(version.to_string())
+    if let Some(version) = WindowsVersion::detect() {
+        Ok(version.to_string())
+    } else {
+        Ok("unknown".to_string())
+    }
 }
 
 pub(crate) fn get_user_agent() -> String {
