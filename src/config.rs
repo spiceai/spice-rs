@@ -16,7 +16,9 @@ fn get_os_release() -> Result<String, Box<dyn std::error::Error>> {
 
 #[cfg(target_family = "windows")]
 fn get_os_release() -> Result<String, Box<dyn std::error::Error>> {
-    todo!("get_os_release not implemented for Windows")
+    use winver::WindowsVersion;
+    let version = WindowsVersion::get()?;
+    Ok(version.to_string())
 }
 
 pub(crate) fn get_user_agent() -> String {
