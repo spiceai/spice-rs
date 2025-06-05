@@ -5,9 +5,10 @@ use crate::{
 };
 use arrow::record_batch::RecordBatch;
 use arrow_flight::decode::FlightRecordBatchStream;
+use spice_util::{fibonacci_backoff::FibonacciBackoffBuilder, retry, RetryError};
 use tonic::transport::Channel;
 
-const MAX_RETRIES: u32 = 5;
+const MAX_RETRIES: usize = 5;
 
 struct SpiceClientConfig {
     flight_channel: Channel,
@@ -79,33 +80,23 @@ impl SpiceClient {
     ///
     /// - `Box<dyn Error + Send + Sync>` for any query error
     pub async fn query(&self, query: &str) -> Result<FlightRecordBatchStream, GenericError> {
-        let mut retry_count = 0;
+        let retry_strategy = FibonacciBackoffBuilder::new()
+            .max_retries(Some(MAX_RETRIES))
+            .build();
 
-        loop {
+        retry(retry_strategy, || async {
             match self.flight.query(query).await {
-                Ok(stream) => return Ok(stream),
+                Ok(stream) => Ok(stream),
                 Err(e) => {
-                    let error_str = e.to_string();
-
-                    if retry_count < MAX_RETRIES && is_retryable_error(&error_str) {
-                        retry_count += 1;
-                        eprintln!(
-                            "Connection error on query attempt {retry_count}/{MAX_RETRIES}: {e}. Retrying..."
-                        );
-
-                        // Exponential backoff
-                        tokio::time::sleep(std::time::Duration::from_millis(
-                            100 * (1 << retry_count),
-                        ))
-                        .await;
-
-                        continue;
+                    if is_retryable_error(&e.to_string()) {
+                        Err(RetryError::transient(e))
+                    } else {
+                        Err(RetryError::permanent(e))
                     }
-
-                    return Err(e);
                 }
             }
-        }
+        })
+        .await
     }
 
     /// Optional parameterized query with the Spice Flight endpoint with the given SQL query.
@@ -130,33 +121,23 @@ impl SpiceClient {
         query: &str,
         params: Option<RecordBatch>,
     ) -> Result<FlightRecordBatchStream, GenericError> {
-        let mut retry_count = 0;
+        let retry_strategy = FibonacciBackoffBuilder::new()
+            .max_retries(Some(MAX_RETRIES))
+            .build();
 
-        loop {
+        retry(retry_strategy, || async {
             match self.flight.query_with_params(query, params.clone()).await {
-                Ok(stream) => return Ok(stream),
+                Ok(stream) => Ok(stream),
                 Err(e) => {
-                    let error_str = e.to_string();
-
-                    if retry_count < MAX_RETRIES && is_retryable_error(&error_str) {
-                        retry_count += 1;
-                        eprintln!(
-                            "Connection error on query attempt {retry_count}/{MAX_RETRIES}: {e}. Retrying..."
-                        );
-
-                        // Exponential backoff
-                        tokio::time::sleep(std::time::Duration::from_millis(
-                            100 * (1 << retry_count),
-                        ))
-                        .await;
-
-                        continue;
+                    if is_retryable_error(&e.to_string()) {
+                        Err(RetryError::transient(e))
+                    } else {
+                        Err(RetryError::permanent(e))
                     }
-
-                    return Err(e);
                 }
             }
-        }
+        })
+        .await
     }
 }
 
