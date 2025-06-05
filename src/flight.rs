@@ -1,9 +1,11 @@
 use crate::config::get_user_agent;
 use crate::config::GenericError;
 use arrow::error::ArrowError;
+use arrow::record_batch::RecordBatch;
 use arrow_flight::decode::FlightRecordBatchStream;
 use arrow_flight::error::FlightError;
 use arrow_flight::flight_service_client::FlightServiceClient;
+use arrow_flight::sql::client::FlightSqlServiceClient;
 use arrow_flight::FlightDescriptor;
 use arrow_flight::HandshakeRequest;
 use arrow_flight::HandshakeResponse;
@@ -31,7 +33,12 @@ fn status_to_arrow_error(status: tonic::Status) -> ArrowError {
 }
 
 impl SqlFlightClient {
-    pub fn new(chan: Channel, api_key: Option<String>, user_agent: Option<String>) -> Self {
+    pub fn new(
+        chan: Channel,
+        api_key: Option<String>,
+        user_agent: Option<String>,
+        cache_control: Option<String>,
+    ) -> Self {
         // Prepend the user agent with the provided user agent if it exists
         let user_agent = match user_agent {
             Some(ua) => format!("{ua} {}", get_user_agent()),
@@ -40,6 +47,10 @@ impl SqlFlightClient {
 
         let mut headers = HashMap::new();
         headers.insert("User-Agent".to_string(), user_agent);
+
+        if let Some(cache_control) = cache_control {
+            headers.insert("Cache-Control".to_string(), cache_control);
+        }
 
         SqlFlightClient {
             api_key,
@@ -153,11 +164,51 @@ impl SqlFlightClient {
                     .into_parts();
 
                 return Ok(FlightRecordBatchStream::new_from_flight_data(
-                    response_stream.map_err(FlightError::Tonic),
+                    response_stream.map_err(|e| FlightError::Tonic(Box::new(e))),
                 )
                 .with_headers(md));
             }
         }
         Err("No endpoints found".into())
+    }
+
+    pub async fn query_with_params(
+        &mut self,
+        query: &str,
+        params: Option<RecordBatch>,
+    ) -> std::result::Result<FlightRecordBatchStream, GenericError> {
+        if let Some(params) = params {
+            Ok(self.execute_prepared_statement(query, params).await?)
+        } else {
+            Ok(self.query(query).await?)
+        }
+    }
+
+    async fn execute_prepared_statement(
+        &mut self,
+        query: &str,
+        parameters: RecordBatch,
+    ) -> std::result::Result<FlightRecordBatchStream, GenericError> {
+        let mut client = FlightSqlServiceClient::new_from_inner(self.client.clone());
+        let mut prepared_stmt = client.prepare(query.to_string(), None).await?;
+
+        prepared_stmt.set_parameters(parameters)?;
+
+        let flight_info = prepared_stmt.execute().await?;
+
+        let endpoint = flight_info
+            .endpoint
+            .first()
+            .ok_or("No endpoint in flight info")?;
+
+        let stream = client
+            .do_get(
+                endpoint
+                    .ticket
+                    .clone()
+                    .ok_or("No flight ticket in response")?,
+            )
+            .await?;
+        Ok(stream)
     }
 }
