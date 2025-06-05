@@ -78,7 +78,7 @@ impl SpiceClient {
     /// ## Errors
     ///
     /// - `Box<dyn Error + Send + Sync>` for any query error
-    pub async fn query(&mut self, query: &str) -> Result<FlightRecordBatchStream, GenericError> {
+    pub async fn query(&self, query: &str) -> Result<FlightRecordBatchStream, GenericError> {
         let mut retry_count = 0;
 
         loop {
@@ -126,7 +126,7 @@ impl SpiceClient {
     ///
     /// - `Box<dyn Error + Send + Sync>` for any query error
     pub async fn query_with_params(
-        &mut self,
+        &self,
         query: &str,
         params: Option<RecordBatch>,
     ) -> Result<FlightRecordBatchStream, GenericError> {

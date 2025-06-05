@@ -8,7 +8,6 @@ use arrow_flight::flight_service_client::FlightServiceClient;
 use arrow_flight::sql::client::FlightSqlServiceClient;
 use arrow_flight::FlightDescriptor;
 use arrow_flight::HandshakeRequest;
-use arrow_flight::HandshakeResponse;
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use bytes::Bytes;
@@ -21,7 +20,6 @@ use tonic::transport::Channel;
 use tonic::IntoRequest;
 
 pub struct SqlFlightClient {
-    token: Option<String>,
     headers: HashMap<String, String>,
     client: FlightServiceClient<Channel>,
     api_key: Option<String>,
@@ -56,11 +54,14 @@ impl SqlFlightClient {
             api_key,
             headers,
             client: FlightServiceClient::new(chan),
-            token: None,
         }
     }
 
-    async fn handshake(&mut self, username: &str, password: &str) -> Result<Bytes, ArrowError> {
+    async fn handshake(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> Result<Option<String>, ArrowError> {
         let cmd = HandshakeRequest {
             protocol_version: 0,
             payload: Bytes::default(),
@@ -71,12 +72,15 @@ impl SqlFlightClient {
             .parse()
             .map_err(|_| ArrowError::ParseError("Cannot parse header".to_string()))?;
         req.metadata_mut().insert("authorization", val);
-        let req = self.set_request_headers(req)?;
+        let req = self.set_request_headers(req, None)?;
         let resp = self
             .client
+            .clone()
             .handshake(req)
             .await
             .map_err(|e| ArrowError::IpcError(format!("Can't handshake {e}")))?;
+
+        let mut token: Option<String> = None;
         if let Some(auth) = resp.metadata().get("authorization") {
             let auth = auth
                 .to_str()
@@ -86,34 +90,31 @@ impl SqlFlightClient {
                 Err(ArrowError::ParseError("Invalid auth header!".to_string()))?;
             }
             let auth = auth[bearer.len()..].to_string();
-            self.token = Some(auth);
+            token = Some(auth);
         }
-        let responses: Vec<HandshakeResponse> = resp
-            .into_inner()
-            .try_collect()
-            .await
-            .map_err(|_| ArrowError::ParseError("Can't collect responses".to_string()))?;
-        let resp = match responses.as_slice() {
-            [resp] => resp.payload.clone(),
-            [] => Bytes::new(),
-            _ => Err(ArrowError::ParseError(
-                "Multiple handshake responses".to_string(),
-            ))?,
-        };
-        Ok(resp)
+        Ok(token)
     }
 
-    async fn authenticate(&mut self, api_key: &str) -> std::result::Result<(), GenericError> {
-        if api_key.split('|').collect::<String>().len() < 2 {
-            return Err("Invalid API key format".into());
-        }
-        self.handshake("", api_key).await?;
-        Ok(())
+    async fn authenticate(&self) -> std::result::Result<Option<String>, GenericError> {
+        let (username, password) = match self.api_key {
+            Some(ref api_key) => {
+                if api_key.split('|').collect::<String>().len() < 2 {
+                    return Err("Invalid API key format".into());
+                }
+                ("", api_key.as_str())
+            }
+            None => return Ok(None),
+        };
+
+        let token = self.handshake(username, password).await?;
+
+        Ok(token)
     }
 
     fn set_request_headers<T>(
         &self,
         mut req: tonic::Request<T>,
+        token: Option<String>,
     ) -> Result<tonic::Request<T>, ArrowError> {
         for (k, v) in &self.headers {
             let k = AsciiMetadataKey::from_str(k.as_str()).map_err(|e| {
@@ -124,7 +125,7 @@ impl SqlFlightClient {
             })?;
             req.metadata_mut().insert(k, v);
         }
-        if let Some(token) = &self.token {
+        if let Some(token) = token {
             let val = format!("Bearer {token}").parse().map_err(|e| {
                 ArrowError::ParseError(format!("Cannot convert token to header value: {e}"))
             })?;
@@ -134,19 +135,17 @@ impl SqlFlightClient {
     }
 
     pub async fn query(
-        &mut self,
+        &self,
         query: &str,
     ) -> std::result::Result<FlightRecordBatchStream, GenericError> {
-        let api_key = self.api_key.clone();
-        if let Some(api_key) = api_key {
-            self.authenticate(&api_key).await?;
-        }
+        let token = self.authenticate().await?;
 
         let descriptor = FlightDescriptor::new_cmd(query.to_string());
-        let req = self.set_request_headers(descriptor.into_request())?;
+        let req = self.set_request_headers(descriptor.into_request(), token.clone())?;
 
         let info = self
             .client
+            .clone()
             .get_flight_info(req)
             .await
             .map_err(status_to_arrow_error)?
@@ -155,9 +154,10 @@ impl SqlFlightClient {
         for ep in info.endpoint {
             if let Some(tkt) = ep.ticket {
                 let req = tkt.into_request();
-                let req = self.set_request_headers(req)?;
+                let req = self.set_request_headers(req, token.clone())?;
                 let (md, response_stream, _ext) = self
                     .client
+                    .clone()
                     .do_get(req)
                     .await
                     .map_err(status_to_arrow_error)?
@@ -173,7 +173,7 @@ impl SqlFlightClient {
     }
 
     pub async fn query_with_params(
-        &mut self,
+        &self,
         query: &str,
         params: Option<RecordBatch>,
     ) -> std::result::Result<FlightRecordBatchStream, GenericError> {
@@ -185,7 +185,7 @@ impl SqlFlightClient {
     }
 
     async fn execute_prepared_statement(
-        &mut self,
+        &self,
         query: &str,
         parameters: RecordBatch,
     ) -> std::result::Result<FlightRecordBatchStream, GenericError> {
