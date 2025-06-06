@@ -9,7 +9,7 @@ use arrow_flight::decode::FlightRecordBatchStream;
 use spice_util::{fibonacci_backoff::FibonacciBackoffBuilder, retry, RetryError};
 use tonic::transport::Channel;
 
-const MAX_RETRIES: usize = 5;
+const MAX_RETRIES: usize = 3;
 
 struct SpiceClientConfig {
     flight_channel: Channel,
@@ -89,13 +89,7 @@ impl SpiceClient {
         retry(retry_strategy, || async {
             match self.flight.query(query).await {
                 Ok(stream) => Ok(stream),
-                Err(e) => {
-                    if is_retryable_error(&e) {
-                        Err(RetryError::transient(e))
-                    } else {
-                        Err(RetryError::permanent(e))
-                    }
-                }
+                Err(e) => Err(map_retryable_error(e)),
             }
         })
         .await
@@ -131,13 +125,7 @@ impl SpiceClient {
         retry(retry_strategy, || async {
             match self.flight.query_with_params(query, params.clone()).await {
                 Ok(stream) => Ok(stream),
-                Err(e) => {
-                    if is_retryable_error(&e) {
-                        Err(RetryError::transient(e))
-                    } else {
-                        Err(RetryError::permanent(e))
-                    }
-                }
+                Err(e) => Err(map_retryable_error(e)),
             }
         })
         .await
@@ -145,11 +133,13 @@ impl SpiceClient {
     }
 }
 
-fn is_retryable_error(error: &GenericError) -> bool {
+fn map_retryable_error(error: GenericError) -> RetryError<GenericError> {
     if let Some(status) = error.downcast_ref::<tonic::Status>() {
-        return status.metadata().get("spiceai-retryable").is_some();
+        if status.metadata().get("spiceai-retryable").is_some() {
+            return RetryError::transient(error);
+        }
     }
-    false
+    RetryError::permanent(error)
 }
 
 fn map_generic_error(error: GenericError) -> GenericError {
@@ -200,6 +190,7 @@ pub struct SpiceClientBuilder {
     user_agent: Option<String>,
     flight_url: Option<String>,
     cache_control: Option<String>,
+    max_retries: usize,
 }
 
 impl Default for SpiceClientBuilder {
@@ -216,6 +207,7 @@ impl SpiceClientBuilder {
             user_agent: None,
             flight_url: None,
             cache_control: None,
+            max_retries: MAX_RETRIES,
         }
     }
 
@@ -240,7 +232,14 @@ impl SpiceClientBuilder {
         self
     }
 
-    /// Configures the cache control to use the given Spice Flight endpoint.
+    /// Configures the `SpiceClient` to use the given maximum number of retries.
+    #[must_use]
+    pub fn max_retries(mut self, max_retries: usize) -> Self {
+        self.max_retries = max_retries;
+        self
+    }
+
+    /// Configures the cache control to use the given cache control policy.
     #[must_use]
     pub fn cache_control(mut self, cache_control: &str) -> Self {
         self.cache_control = Some(cache_control.to_string());
