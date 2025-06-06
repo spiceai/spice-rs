@@ -15,14 +15,16 @@ use futures::stream;
 use futures::TryStreamExt;
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::Arc;
 use tonic::metadata::AsciiMetadataKey;
 use tonic::transport::Channel;
 use tonic::IntoRequest;
 
+#[derive(Clone)]
 pub struct SqlFlightClient {
-    headers: HashMap<String, String>,
+    headers: Arc<HashMap<String, String>>,
     client: FlightServiceClient<Channel>,
-    api_key: Option<String>,
+    api_key: Option<Arc<str>>,
 }
 
 impl SqlFlightClient {
@@ -46,8 +48,8 @@ impl SqlFlightClient {
         }
 
         SqlFlightClient {
-            api_key,
-            headers,
+            api_key: api_key.map(|s| Arc::from(s.into_boxed_str())),
+            headers: Arc::new(headers),
             client: FlightServiceClient::new(chan),
         }
     }
@@ -91,12 +93,12 @@ impl SqlFlightClient {
     }
 
     async fn authenticate(&self) -> std::result::Result<Option<String>, GenericError> {
-        let (username, password) = match self.api_key {
-            Some(ref api_key) => {
-                if api_key.split('|').collect::<String>().len() < 2 {
+        let (username, password) = match &self.api_key {
+            Some(api_key) => {
+                if api_key.to_string().split('|').collect::<String>().len() < 2 {
                     return Err("Invalid API key format".into());
                 }
-                ("", api_key.as_str())
+                ("", api_key.as_ref())
             }
             None => return Ok(None),
         };
@@ -111,7 +113,7 @@ impl SqlFlightClient {
         mut req: tonic::Request<T>,
         token: Option<String>,
     ) -> Result<tonic::Request<T>, ArrowError> {
-        for (k, v) in &self.headers {
+        for (k, v) in self.headers.iter() {
             let k = AsciiMetadataKey::from_str(k.as_str()).map_err(|e| {
                 ArrowError::ParseError(format!("Cannot convert header key \"{k}\": {e}"))
             })?;
