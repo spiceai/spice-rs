@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose, Engine as _};
 use std::str::FromStr;
 use tonic::transport::channel::{ClientTlsConfig, Endpoint};
 use tonic::transport::Channel;
@@ -8,16 +9,18 @@ pub fn system_tls_certificate() -> Result<tonic::transport::Certificate, Generic
     // Load root certificates found in the platform’s native certificate store.
     let certs = rustls_native_certs::load_native_certs()?;
 
-    let concatenated_pems = certs
-        .iter()
-        .filter_map(|cert| {
-            let mut buf = &cert.0[..];
-            rustls_pemfile::certs(&mut buf).ok()?.pop()
-        })
-        .map(String::from_utf8)
-        .collect::<Result<String, _>>()?;
+    let mut pem_data = String::new();
+    for cert in certs {
+        let encoded = general_purpose::STANDARD.encode(&cert.0);
+        pem_data.push_str("-----BEGIN CERTIFICATE-----\n");
+        for chunk in encoded.as_bytes().chunks(64) {
+            pem_data.push_str(&String::from_utf8_lossy(chunk));
+            pem_data.push('\n');
+        }
+        pem_data.push_str("-----END CERTIFICATE-----\n");
+    }
 
-    Ok(tonic::transport::Certificate::from_pem(concatenated_pems))
+    Ok(tonic::transport::Certificate::from_pem(pem_data))
 }
 
 pub async fn new_tls_flight_channel(https_url: &str) -> Result<Channel, GenericError> {

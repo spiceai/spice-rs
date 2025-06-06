@@ -27,6 +27,7 @@ dotenv = "0.15.0"
 arrow = "55.1.0"
 futures = "0.3.30"
 base64 = "0.22.0"
+pem = "3.0"
 
 [target.'cfg(windows)'.dependencies]
 winver = "1.0.0"
