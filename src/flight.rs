@@ -95,7 +95,7 @@ impl SqlFlightClient {
     async fn authenticate(&self) -> std::result::Result<Option<String>, GenericError> {
         let (username, password) = match &self.api_key {
             Some(api_key) => {
-                if api_key.to_string().split('|').collect::<String>().len() < 2 {
+                if api_key.as_ref().split('|').collect::<String>().len() < 2 {
                     return Err("Invalid API key format".into());
                 }
                 ("", api_key.as_ref())

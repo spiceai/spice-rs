@@ -149,7 +149,7 @@ fn is_retryable_error(error: &GenericError) -> bool {
     if let Some(status) = error.downcast_ref::<tonic::Status>() {
         return status.metadata().get("spiceai-retryable").is_some();
     }
-    return false;
+    false
 }
 
 fn map_generic_error(error: GenericError) -> GenericError {
