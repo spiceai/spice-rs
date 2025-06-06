@@ -1,11 +1,13 @@
 #[cfg(test)]
 mod tests {
     use futures::stream::StreamExt;
+    use rustls::crypto::{self, CryptoProvider};
     use spiceai::{Client, ClientBuilder};
     use std::env;
     use std::path::Path;
 
     async fn new_client() -> Client {
+        let _ = CryptoProvider::install_default(crypto::aws_lc_rs::default_provider());
         dotenv::from_path(Path::new(".env.local")).ok();
         let api_key = env::var("API_KEY").expect("API_KEY not found");
         ClientBuilder::new()
@@ -14,11 +16,6 @@ mod tests {
             .build()
             .await
             .expect("Failed to create client")
-    }
-
-    #[tokio::test]
-    async fn test_new_client() {
-        new_client().await;
     }
 
     #[tokio::test]
