@@ -45,19 +45,19 @@ mod tests {
         );
     }
 
-    // #[tokio::test]
-    // async fn test_readme_builder_local() {
-    //     // NOTE: If you're changing the code below, make sure you update the README.md.
-    //     let mut client = ClientBuilder::new()
-    //         .build()
-    //         .await
-    //         .expect("SpiceClient should be created");
+    #[tokio::test]
+    async fn test_readme_builder_local() {
+        // NOTE: If you're changing the code below, make sure you update the README.md.
+        let mut client = ClientBuilder::new()
+            .build()
+            .await
+            .expect("SpiceClient should be created");
 
-    //     let data = client.query("select * from taxi_trips limit 3;").await;
-    //     assert!(
-    //         data.is_ok(),
-    //         "failed to query: {:#?}",
-    //         data.expect_err("should be an error")
-    //     );
-    // }
+        let data = client.query("select * from taxi_trips limit 3;").await;
+        assert!(
+            data.is_ok(),
+            "failed to query: {:#?}",
+            data.expect_err("should be an error")
+        );
+    }
 }
