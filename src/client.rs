@@ -3,6 +3,7 @@ use crate::{
     flight::SqlFlightClient,
     tls::new_tls_flight_channel,
 };
+use arrow::error::ArrowError;
 use arrow::record_batch::RecordBatch;
 use arrow_flight::decode::FlightRecordBatchStream;
 use spice_util::{fibonacci_backoff::FibonacciBackoffBuilder, retry, RetryError};
@@ -88,7 +89,7 @@ impl SpiceClient {
             match self.flight.query(query).await {
                 Ok(stream) => Ok(stream),
                 Err(e) => {
-                    if is_retryable_error(&e.to_string()) {
+                    if is_retryable_error(&e) {
                         Err(RetryError::transient(e))
                     } else {
                         Err(RetryError::permanent(e))
@@ -97,6 +98,7 @@ impl SpiceClient {
             }
         })
         .await
+        .map_err(map_generic_error)
     }
 
     /// Optional parameterized query with the Spice Flight endpoint with the given SQL query.
@@ -129,7 +131,7 @@ impl SpiceClient {
             match self.flight.query_with_params(query, params.clone()).await {
                 Ok(stream) => Ok(stream),
                 Err(e) => {
-                    if is_retryable_error(&e.to_string()) {
+                    if is_retryable_error(&e) {
                         Err(RetryError::transient(e))
                     } else {
                         Err(RetryError::permanent(e))
@@ -138,13 +140,27 @@ impl SpiceClient {
             }
         })
         .await
+        .map_err(map_generic_error)
     }
 }
 
-fn is_retryable_error(error_str: &str) -> bool {
-    error_str
-        .to_lowercase()
-        .contains("connection is reset by the server. please retry the request.")
+fn is_retryable_error(error: &GenericError) -> bool {
+    if let Some(status) = error.downcast_ref::<tonic::Status>() {
+        return status.metadata().get("spiceai-retryable").is_some();
+    }
+    return false;
+}
+
+fn map_generic_error(error: GenericError) -> GenericError {
+    if let Some(status) = error.downcast_ref::<tonic::Status>() {
+        return status_to_arrow_error(status).into();
+    }
+    error
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn status_to_arrow_error(status: &tonic::Status) -> ArrowError {
+    ArrowError::IpcError(format!("{status:?}"))
 }
 
 /// Builder for creating a `SpiceClient`.

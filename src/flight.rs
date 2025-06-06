@@ -25,11 +25,6 @@ pub struct SqlFlightClient {
     api_key: Option<String>,
 }
 
-#[allow(clippy::needless_pass_by_value)]
-fn status_to_arrow_error(status: tonic::Status) -> ArrowError {
-    ArrowError::IpcError(format!("{status:?}"))
-}
-
 impl SqlFlightClient {
     pub fn new(
         chan: Channel,
@@ -143,25 +138,14 @@ impl SqlFlightClient {
         let descriptor = FlightDescriptor::new_cmd(query.to_string());
         let req = self.set_request_headers(descriptor.into_request(), token.clone())?;
 
-        let info = self
-            .client
-            .clone()
-            .get_flight_info(req)
-            .await
-            .map_err(status_to_arrow_error)?
-            .into_inner();
+        let info = self.client.clone().get_flight_info(req).await?.into_inner();
 
         for ep in info.endpoint {
             if let Some(tkt) = ep.ticket {
                 let req = tkt.into_request();
                 let req = self.set_request_headers(req, token.clone())?;
-                let (md, response_stream, _ext) = self
-                    .client
-                    .clone()
-                    .do_get(req)
-                    .await
-                    .map_err(status_to_arrow_error)?
-                    .into_parts();
+                let (md, response_stream, _ext) =
+                    self.client.clone().do_get(req).await?.into_parts();
 
                 return Ok(FlightRecordBatchStream::new_from_flight_data(
                     response_stream.map_err(|e| FlightError::Tonic(Box::new(e))),
