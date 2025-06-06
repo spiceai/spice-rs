@@ -36,6 +36,7 @@ impl SpiceClient {
     ///
     /// #[tokio::main]
     /// async fn main() {
+    ///     let _ = rustls::crypto::CryptoProvider::install_default(rustls::crypto::aws_lc_rs::default_provider());
     ///     let mut client = Client::new("API_KEY").await.unwrap();
     /// }
     /// ```
@@ -59,10 +60,10 @@ impl SpiceClient {
     /// Queries the Spice Flight endpoint with the given SQL query.
     /// ```
     /// # use spiceai::Client;
-    /// #
     /// # #[tokio::main]
     /// # async fn main() {
-    /// #  let mut client = Client::new("API_KEY").await.unwrap();
+    /// #     let _ = rustls::crypto::CryptoProvider::install_default(rustls::crypto::aws_lc_rs::default_provider());
+    /// #     let mut client = Client::new("API_KEY").await.unwrap();
     /// let data = client.query("SELECT * FROM taxi_trips LIMIT 10;").await;
     /// # }
     /// ````
@@ -81,9 +82,10 @@ impl SpiceClient {
 /// Follow [spiceai quickstart](https://github.com/spiceai/spiceai?tab=readme-ov-file#%EF%B8%8F-quickstart-local-machine) to setup local spice runtime.
 /// ```
 /// # use spiceai::ClientBuilder;
-/// #
+///
 /// # #[tokio::main]
 /// # async fn main() {
+///      let _ = rustls::crypto::CryptoProvider::install_default(rustls::crypto::aws_lc_rs::default_provider());
 /// #    let mut client = ClientBuilder::new()
 /// #      .build()
 /// #      .await
@@ -94,9 +96,9 @@ impl SpiceClient {
 ///
 /// ```
 /// # use spiceai::ClientBuilder;
-/// #
 /// # #[tokio::main]
 /// # async fn main() {
+/// #    let _ = rustls::crypto::CryptoProvider::install_default(rustls::crypto::aws_lc_rs::default_provider());
 /// #    let mut client = ClientBuilder::new()
 /// #      .api_key("API_KEY")
 /// #      .use_spiceai_cloud()
