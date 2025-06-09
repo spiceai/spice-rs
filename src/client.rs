@@ -1,3 +1,4 @@
+use crate::util::{retry, FibonacciBackoffBuilder, RetryError};
 use crate::{
     config::{GenericError, SPICE_CLOUD_FLIGHT_ADDR, SPICE_LOCAL_FLIGHT_ADDR},
     flight::SqlFlightClient,
@@ -6,7 +7,6 @@ use crate::{
 use arrow::error::ArrowError;
 use arrow::record_batch::RecordBatch;
 use arrow_flight::decode::FlightRecordBatchStream;
-use spice_util::{fibonacci_backoff::FibonacciBackoffBuilder, retry, RetryError};
 use tonic::transport::Channel;
 
 const MAX_RETRIES: usize = 3;
