@@ -1,9 +1,11 @@
+use crate::config::GenericError;
 use base64::{engine::general_purpose, Engine as _};
 use std::str::FromStr;
+use std::sync::Once;
 use tonic::transport::channel::{ClientTlsConfig, Endpoint};
 use tonic::transport::Channel;
 
-use crate::config::GenericError;
+static INIT: Once = Once::new();
 
 pub fn system_tls_certificate() -> Result<tonic::transport::Certificate, GenericError> {
     // Load root certificates found in the platform’s native certificate store.
@@ -35,4 +37,17 @@ pub async fn new_tls_flight_channel(https_url: &str) -> Result<Channel, GenericE
     }
 
     Ok(endpoint.connect().await?)
+}
+
+pub(crate) fn ensure_crypto_provider() {
+    INIT.call_once(|| {
+        if rustls::crypto::CryptoProvider::get_default().is_none() {
+            println!("Initializing crypto provider...");
+            let _ = rustls::crypto::CryptoProvider::install_default(
+                rustls::crypto::aws_lc_rs::default_provider(),
+            );
+        } else {
+            println!("Crypto provider already initialized.");
+        }
+    });
 }

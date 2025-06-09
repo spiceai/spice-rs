@@ -1,9 +1,10 @@
 use crate::{
     config::{GenericError, SPICE_CLOUD_FLIGHT_ADDR, SPICE_LOCAL_FLIGHT_ADDR},
     flight::SqlFlightClient,
-    tls::new_tls_flight_channel,
+    tls::{ensure_crypto_provider, new_tls_flight_channel},
 };
 use arrow_flight::decode::FlightRecordBatchStream;
+
 use tonic::transport::Channel;
 
 struct SpiceClientConfig {
@@ -36,7 +37,6 @@ impl SpiceClient {
     ///
     /// #[tokio::main]
     /// async fn main() {
-    ///     let _ = rustls::crypto::CryptoProvider::install_default(rustls::crypto::aws_lc_rs::default_provider());
     ///     let mut client = Client::new("API_KEY").await.unwrap();
     /// }
     /// ```
@@ -45,6 +45,7 @@ impl SpiceClient {
     ///
     /// - `Box<dyn Error + Send + Sync>` for any query error
     pub async fn new(api_key: &str) -> Result<Self, GenericError> {
+        ensure_crypto_provider();
         let config = SpiceClientConfig::load_from_default().await?;
 
         Ok(Self {
@@ -62,7 +63,6 @@ impl SpiceClient {
     /// # use spiceai::Client;
     /// # #[tokio::main]
     /// # async fn main() {
-    /// #     let _ = rustls::crypto::CryptoProvider::install_default(rustls::crypto::aws_lc_rs::default_provider());
     /// #     let mut client = Client::new("API_KEY").await.unwrap();
     /// let data = client.query("SELECT * FROM taxi_trips LIMIT 10;").await;
     /// # }
@@ -85,7 +85,6 @@ impl SpiceClient {
 ///
 /// # #[tokio::main]
 /// # async fn main() {
-///      let _ = rustls::crypto::CryptoProvider::install_default(rustls::crypto::aws_lc_rs::default_provider());
 /// #    let mut client = ClientBuilder::new()
 /// #      .build()
 /// #      .await
@@ -98,7 +97,6 @@ impl SpiceClient {
 /// # use spiceai::ClientBuilder;
 /// # #[tokio::main]
 /// # async fn main() {
-/// #    let _ = rustls::crypto::CryptoProvider::install_default(rustls::crypto::aws_lc_rs::default_provider());
 /// #    let mut client = ClientBuilder::new()
 /// #      .api_key("API_KEY")
 /// #      .use_spiceai_cloud()
@@ -165,6 +163,7 @@ impl SpiceClientBuilder {
     ///
     /// - `Box<dyn Error + Send + Sync>` if flight channel creation fails
     pub async fn build(self) -> Result<SpiceClient, GenericError> {
+        ensure_crypto_provider();
         let flight_channel = match self.flight_url {
             Some(url) => new_tls_flight_channel(&url).await?,
             None => new_tls_flight_channel(SPICE_LOCAL_FLIGHT_ADDR).await?,

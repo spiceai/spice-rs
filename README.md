@@ -40,7 +40,6 @@ use spiceai::ClientBuilder;
 
 #[tokio::main]
 async fn main() {
-  let _ = rustls::crypto::CryptoProvider::install_default(rustls::crypto::aws_lc_rs::default_provider());
   let mut client = ClientBuilder::new()
     .api_key("API_KEY")
     .use_spiceai_cloud()
@@ -59,7 +58,6 @@ use spiceai::ClientBuilder;
 
 #[tokio::main]
 async fn main() {
-  let _ = rustls::crypto::CryptoProvider::install_default(rustls::crypto::aws_lc_rs::default_provider());
   let mut client = ClientBuilder::new()
     .api_key("API_KEY")
     .use_spiceai_cloud()
