@@ -38,6 +38,8 @@ pub async fn new_tls_flight_channel(https_url: &str) -> Result<Channel, GenericE
 }
 
 pub(crate) fn ensure_crypto_provider() {
+    // Install the default AWS LC RS crypto provider for rusttls
+    // Use the same provider as spiceai: https://github.com/spiceai/spiceai/blob/571007c4be89a2a9892e3bd0eb43f8bd28464a69/bin/spiced/src/main.rs#L74
     INIT.call_once(|| {
         if rustls::crypto::CryptoProvider::get_default().is_none() {
             let _ = rustls::crypto::CryptoProvider::install_default(
