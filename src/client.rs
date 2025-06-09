@@ -42,7 +42,7 @@ impl SpiceClient {
     ///
     /// #[tokio::main]
     /// async fn main() {
-    ///     let mut client = Client::new("API_KEY").await.unwrap();
+    ///     let client = Client::new("API_KEY").await.unwrap();
     /// }
     /// ```
     ///
@@ -73,7 +73,7 @@ impl SpiceClient {
     /// #
     /// # #[tokio::main]
     /// # async fn main() {
-    /// #  let mut client = Client::new("API_KEY").await.unwrap();
+    /// #  let client = Client::new("API_KEY").await.unwrap();
     /// let data = client.query("SELECT * FROM taxi_trips LIMIT 10;").await;
     /// # }
     /// ````
@@ -105,7 +105,7 @@ impl SpiceClient {
     /// #
     /// # #[tokio::main]
     /// # async fn main() {
-    /// #  let mut client = Client::new("API_KEY").await.unwrap();
+    /// #  let client = Client::new("API_KEY").await.unwrap();
     /// let data = client.query_with_params("SELECT * FROM taxi_trips LIMIT 10;", None).await;
     /// # }
     /// ````
@@ -163,7 +163,7 @@ fn status_to_arrow_error(status: &tonic::Status) -> ArrowError {
 /// #
 /// # #[tokio::main]
 /// # async fn main() {
-/// #    let mut client = ClientBuilder::new()
+/// #    let client = ClientBuilder::new()
 /// #      .build()
 /// #      .await
 /// #      .unwrap();
@@ -176,7 +176,7 @@ fn status_to_arrow_error(status: &tonic::Status) -> ArrowError {
 /// #
 /// # #[tokio::main]
 /// # async fn main() {
-/// #    let mut client = ClientBuilder::new()
+/// #    let client = ClientBuilder::new()
 /// #      .api_key("API_KEY")
 /// #      .use_spiceai_cloud()
 /// #      .build()
