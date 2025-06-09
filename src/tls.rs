@@ -42,12 +42,9 @@ pub async fn new_tls_flight_channel(https_url: &str) -> Result<Channel, GenericE
 pub(crate) fn ensure_crypto_provider() {
     INIT.call_once(|| {
         if rustls::crypto::CryptoProvider::get_default().is_none() {
-            println!("Initializing crypto provider...");
             let _ = rustls::crypto::CryptoProvider::install_default(
                 rustls::crypto::aws_lc_rs::default_provider(),
             );
-        } else {
-            println!("Crypto provider already initialized.");
         }
     });
 }
