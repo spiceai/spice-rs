@@ -26,11 +26,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_new_client() {
-        new_client().await;
-    }
-
-    #[tokio::test]
     async fn test_new_client_builder() {
         new_client().await;
     }
