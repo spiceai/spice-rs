@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+    use arrow::compute::concat_batches;
     use futures::stream::StreamExt;
     use spiceai::{Client, ClientBuilder};
     use std::env;
@@ -31,18 +32,22 @@ mod tests {
             .await
         {
             Ok(mut flight_data_stream) => {
+                let mut batches = Vec::new();
                 // Read back RecordBatches
                 while let Some(batch) = flight_data_stream.next().await {
                     match batch {
                         Ok(batch) => {
-                            assert_eq!(batch.num_columns(), 3);
-                            assert_eq!(batch.num_rows(), 10);
+                            batches.push(batch);
                         }
                         Err(e) => {
                             panic!("Error: {e}")
                         }
                     };
                 }
+                let batch_concat = concat_batches(&batches[0].schema(), &batches)
+                    .expect("Failed to concat batches");
+                assert_eq!(batch_concat.num_columns(), 3);
+                assert_eq!(batch_concat.num_rows(), 10);
             }
             Err(e) => {
                 panic!("Error: {e}");
