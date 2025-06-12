@@ -99,7 +99,7 @@ async fn main() {
   let data = client.query_with_params(
     "SELECT VendorID, tpep_pickup_datetime, fare_amount FROM taxi_trips WHERE VendorID == $1 and fare_amount > $2 ORDER BY fare_amount, tpep_pickup_datetime LIMIT 5;",
     Some(params),
-  ).await
+  ).await;
 ```
 
 ## Documentation
