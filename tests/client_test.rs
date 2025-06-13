@@ -61,33 +61,29 @@ mod tests {
             rustls::crypto::aws_lc_rs::default_provider(),
         );
         let spice_client = new_local_client().await;
-        match spice_client
-            .query("SELECT VendorID, tpep_pickup_datetime, fare_amount FROM taxi_trips WHERE VendorID == 1 and fare_amount > 1.0 ORDER BY fare_amount, tpep_pickup_datetime LIMIT 5;")
-            .await
-        {
-            Ok(mut flight_data_stream) => {
-                let mut batches = Vec::new();
-                // Read back RecordBatches
-                while let Some(batch) = flight_data_stream.next().await {
-                    match batch {
-                        Ok(batch) => {
-                            batches.push(batch);
-                        }
-                        Err(e) => {
-                            panic!("Error: {e}")
-                        }
-                    }
+        let mut flight_data_stream =  spice_client
+            .query("SELECT VendorID, tpep_pickup_datetime, fare_amount FROM taxi_trips WHERE VendorID == 1 and fare_amount > 1.0 ORDER BY fare_amount, tpep_pickup_datetime LIMIT 5;");
+        let mut batches = Vec::new();
+        // Read back RecordBatches
+        while let Some(batch) = flight_data_stream.next().await {
+            match batch {
+                Ok(batch) => {
+                    batches.push(batch);
                 }
-                let batch_concat = concat_batches(&batches[0].schema(), &batches).expect("Failed to concat batches");
-                let formatted = format!("{}", pretty_format_batches(&[batch_concat.clone()]).expect("Failed to format batches"));
-                assert_eq!(batch_concat.num_columns(), 3);
-                assert_eq!(batch_concat.num_rows(), 5);
-                assert_eq!(formatted, get_expected_result());
+                Err(e) => {
+                    panic!("Error: {e}")
+                }
             }
-            Err(e) => {
-                panic!("Error: {e}");
-            }
-        };
+        }
+        let batch_concat =
+            concat_batches(&batches[0].schema(), &batches).expect("Failed to concat batches");
+        let formatted = format!(
+            "{}",
+            pretty_format_batches(&[batch_concat.clone()]).expect("Failed to format batches")
+        );
+        assert_eq!(batch_concat.num_columns(), 3);
+        assert_eq!(batch_concat.num_rows(), 5);
+        assert_eq!(formatted, get_expected_result());
     }
 
     #[tokio::test]
@@ -97,101 +93,79 @@ mod tests {
         );
         let spice_client = new_local_client().await;
         let params = create_param_batch();
-        match spice_client
+        let mut flight_data_stream = spice_client
             .query_with_params(
                 "SELECT VendorID, tpep_pickup_datetime, fare_amount FROM taxi_trips WHERE VendorID == $1 and fare_amount > $2 ORDER BY fare_amount, tpep_pickup_datetime LIMIT 5;",
                 Some(params),
-            )
-            .await
-        {
-            Ok(mut flight_data_stream) => {
-                let mut batches = Vec::new();
-                // Read back RecordBatches
-                while let Some(batch) = flight_data_stream.next().await {
-                    match batch {
-                        Ok(batch) => {
-                            batches.push(batch);
-                        }
-                        Err(e) => {
-                            panic!("Error: {e}")
-                        }
-                    }
+            );
+        let mut batches = Vec::new();
+        // Read back RecordBatches
+        while let Some(batch) = flight_data_stream.next().await {
+            match batch {
+                Ok(batch) => {
+                    batches.push(batch);
                 }
-                let batch_concat = concat_batches(&batches[0].schema(), &batches).expect("Failed to concat batches");
-                let formatted = format!("{}", pretty_format_batches(&[batch_concat.clone()]).expect("Failed to format batches"));
-                assert_eq!(batch_concat.num_columns(), 3);
-                assert_eq!(batch_concat.num_rows(), 5);
-                assert_eq!(formatted, get_expected_result());
+                Err(e) => {
+                    panic!("Error: {e}")
+                }
             }
-            Err(e) => {
-                panic!("Error: {e}");
-            }
-        };
+        }
+        let batch_concat =
+            concat_batches(&batches[0].schema(), &batches).expect("Failed to concat batches");
+        let formatted = format!(
+            "{}",
+            pretty_format_batches(&[batch_concat.clone()]).expect("Failed to format batches")
+        );
+        assert_eq!(batch_concat.num_columns(), 3);
+        assert_eq!(batch_concat.num_rows(), 5);
+        assert_eq!(formatted, get_expected_result());
     }
 
     #[tokio::test]
     async fn test_query() {
         let spice_client = new_cloud_client().await;
-        match spice_client
-            .query(
-                r#"select VendorID, trip_distance, tpep_pickup_datetime from taxi_trips limit 10;"#,
-            )
-            .await
-        {
-            Ok(mut flight_data_stream) => {
-                let mut batches = Vec::new();
-                // Read back RecordBatches
-                while let Some(batch) = flight_data_stream.next().await {
-                    match batch {
-                        Ok(batch) => {
-                            batches.push(batch);
-                        }
-                        Err(e) => {
-                            panic!("Error: {e}")
-                        }
-                    };
+        let mut flight_data_stream = spice_client.query(
+            r#"select VendorID, trip_distance, tpep_pickup_datetime from taxi_trips limit 10;"#,
+        );
+        let mut batches = Vec::new();
+        // Read back RecordBatches
+        while let Some(batch) = flight_data_stream.next().await {
+            match batch {
+                Ok(batch) => {
+                    batches.push(batch);
                 }
-                let batch_concat = concat_batches(&batches[0].schema(), &batches)
-                    .expect("Failed to concat batches");
-                assert_eq!(batch_concat.num_columns(), 3);
-                assert_eq!(batch_concat.num_rows(), 10);
-            }
-            Err(e) => {
-                panic!("Error: {e}");
-            }
-        };
+                Err(e) => {
+                    panic!("Error: {e}")
+                }
+            };
+        }
+        let batch_concat =
+            concat_batches(&batches[0].schema(), &batches).expect("Failed to concat batches");
+        assert_eq!(batch_concat.num_columns(), 3);
+        assert_eq!(batch_concat.num_rows(), 10);
     }
 
     #[tokio::test]
     async fn test_query_streaming() {
         let spice_client = new_cloud_client().await;
-        match spice_client
-            .query(
-                "select VendorID, trip_distance, tpep_pickup_datetime from taxi_trips limit 10000",
-            )
-            .await
-        {
-            Ok(mut flight_data_stream) => {
-                // Read back RecordBatches
-                let mut num_batches = 0;
-                let mut total_rows = 0;
-                while let Some(batch) = flight_data_stream.next().await {
-                    match batch {
-                        Ok(batch) => {
-                            num_batches += 1;
-                            total_rows += batch.num_rows();
-                        }
-                        Err(e) => {
-                            panic!("Error: {e}")
-                        }
-                    };
+        let mut flight_data_stream = spice_client.query(
+            "select VendorID, trip_distance, tpep_pickup_datetime from taxi_trips limit 10000",
+        );
+        // Read back RecordBatches
+        let mut num_batches = 0;
+        let mut total_rows = 0;
+        while let Some(batch) = flight_data_stream.next().await {
+            match batch {
+                Ok(batch) => {
+                    num_batches += 1;
+                    total_rows += batch.num_rows();
                 }
-                assert_eq!(total_rows, 10000);
-                assert_ne!(num_batches, 1);
-            }
-            Err(e) => {
-                panic!("Error: {e}");
-            }
-        };
+                Err(e) => {
+                    panic!("Error: {e}")
+                }
+            };
+        }
+        assert_eq!(total_rows, 10000);
+        assert_ne!(num_batches, 1);
     }
 }

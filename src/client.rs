@@ -1,16 +1,31 @@
-use crate::util::{retry, FibonacciBackoffBuilder, RetryError};
+use crate::flight::{query_to_stream_with_params, RetryableQueryStream};
 use crate::{
     config::{GenericError, SPICE_CLOUD_FLIGHT_ADDR, SPICE_LOCAL_FLIGHT_ADDR},
     flight::SqlFlightClient,
     tls::{ensure_crypto_provider, new_tls_flight_channel},
 };
-use arrow::error::ArrowError;
 use arrow::record_batch::RecordBatch;
-use arrow_flight::decode::FlightRecordBatchStream;
+use arrow_flight::error::FlightError;
+use snafu::Snafu;
+use std::sync::Arc;
 
 use tonic::transport::Channel;
 
 const MAX_RETRIES: usize = 3;
+
+#[derive(Debug, Snafu)]
+pub enum Error {
+    #[snafu(display("Query execution failed: {source}"))]
+    Query {
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    #[snafu(display("Failed to process query stream: {source}"))]
+    QueryStream { source: FlightError },
+
+    #[snafu(display("Connection reset: {message}\nPlease retry the query."))]
+    ConnectionReset { message: String },
+}
 
 struct SpiceClientConfig {
     flight_channel: Channel,
@@ -33,7 +48,7 @@ impl SpiceClientConfig {
 #[allow(clippy::module_name_repetitions)]
 #[derive(Clone)]
 pub struct SpiceClient {
-    flight: SqlFlightClient,
+    flight: Arc<SqlFlightClient>,
 }
 
 impl SpiceClient {
@@ -55,12 +70,13 @@ impl SpiceClient {
         let config = SpiceClientConfig::load_from_default().await?;
 
         Ok(Self {
-            flight: SqlFlightClient::new(
+            flight: Arc::new(SqlFlightClient::new(
                 config.flight_channel,
                 Some(api_key.to_string()),
                 None,
                 None,
-            ),
+                MAX_RETRIES,
+            )),
         })
     }
 
@@ -82,19 +98,9 @@ impl SpiceClient {
     /// ## Errors
     ///
     /// - `Box<dyn Error + Send + Sync>` for any query error
-    pub async fn query(&self, query: &str) -> Result<FlightRecordBatchStream, GenericError> {
-        let retry_strategy = FibonacciBackoffBuilder::new()
-            .max_retries(Some(MAX_RETRIES))
-            .build();
-
-        retry(retry_strategy, || async {
-            match self.flight.query(query).await {
-                Ok(stream) => Ok(stream),
-                Err(e) => Err(map_retryable_error(e)),
-            }
-        })
-        .await
-        .map_err(map_generic_error)
+    #[must_use]
+    pub fn query(&self, query: &str) -> RetryableQueryStream {
+        query_to_stream_with_params(Arc::clone(&self.flight), query, None)
     }
 
     /// Optional parameterized query with the Spice Flight endpoint with the given SQL query.
@@ -114,45 +120,14 @@ impl SpiceClient {
     /// ## Errors
     ///
     /// - `Box<dyn Error + Send + Sync>` for any query error
-    pub async fn query_with_params(
+    #[must_use]
+    pub fn query_with_params(
         &self,
         query: &str,
         params: Option<RecordBatch>,
-    ) -> Result<FlightRecordBatchStream, GenericError> {
-        let retry_strategy = FibonacciBackoffBuilder::new()
-            .max_retries(Some(MAX_RETRIES))
-            .build();
-
-        retry(retry_strategy, || async {
-            match self.flight.query_with_params(query, params.clone()).await {
-                Ok(stream) => Ok(stream),
-                Err(e) => Err(map_retryable_error(e)),
-            }
-        })
-        .await
-        .map_err(map_generic_error)
+    ) -> RetryableQueryStream {
+        query_to_stream_with_params(Arc::clone(&self.flight), query, params)
     }
-}
-
-fn map_retryable_error(error: GenericError) -> RetryError<GenericError> {
-    if let Some(status) = error.downcast_ref::<tonic::Status>() {
-        if status.metadata().get("spiceai-retryable").is_some() {
-            return RetryError::transient(error);
-        }
-    }
-    RetryError::permanent(error)
-}
-
-fn map_generic_error(error: GenericError) -> GenericError {
-    if let Some(status) = error.downcast_ref::<tonic::Status>() {
-        return status_to_arrow_error(status).into();
-    }
-    error
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn status_to_arrow_error(status: &tonic::Status) -> ArrowError {
-    ArrowError::IpcError(format!("{status:?}"))
 }
 
 /// Builder for creating a `SpiceClient`.
@@ -267,12 +242,13 @@ impl SpiceClientBuilder {
         };
 
         Ok(SpiceClient {
-            flight: SqlFlightClient::new(
+            flight: Arc::new(SqlFlightClient::new(
                 flight_channel,
                 self.api_key.clone(),
                 self.user_agent.clone(),
                 self.cache_control.clone(),
-            ),
+                self.max_retries,
+            )),
         })
     }
 }
