@@ -91,7 +91,7 @@ impl SpiceClient {
     /// # #[tokio::main]
     /// # async fn main() {
     /// #  let client = Client::new("API_KEY").await.unwrap();
-    /// let data = client.query("SELECT * FROM taxi_trips LIMIT 10;").await;
+    /// #  let data = client.query("SELECT * FROM taxi_trips LIMIT 10;");
     /// # }
     /// ````
     ///
@@ -113,7 +113,7 @@ impl SpiceClient {
     /// # #[tokio::main]
     /// # async fn main() {
     /// #  let client = Client::new("API_KEY").await.unwrap();
-    /// let data = client.query_with_params("SELECT * FROM taxi_trips LIMIT 10;", None).await;
+    /// #  let data = client.query_with_params("SELECT * FROM taxi_trips LIMIT 10;", None);
     /// # }
     /// ````
     ///

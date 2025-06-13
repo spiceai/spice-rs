@@ -205,6 +205,34 @@ impl SqlFlightClient {
     }
 }
 
+#[allow(clippy::needless_pass_by_value)]
+pub fn query_to_stream_with_params(
+    client: Arc<SqlFlightClient>,
+    sql: &str,
+    params: Option<RecordBatch>,
+) -> RetryableQueryStream {
+    RetryableQueryStream::new(client, sql, params, Duration::from_secs(1))
+}
+
+/// Represents the current state of the `RetryableQueryStream` state machine.
+///
+/// The stream transitions through these states during query execution:
+/// `Ready` → `Executing` → `Streaming` → (on error) → `ErrorYielded` → `Sleeping` → `Ready`
+/// or
+/// `Ready` → `Executing` → (on error) → `ErrorYielded` → `Sleeping` → `Ready`
+enum StreamState {
+    /// Initial state, ready to start or retry a query
+    Ready,
+    /// Query is being executed, waiting for the server to return a stream
+    Executing(Pin<Box<dyn Future<Output = Result<FlightRecordBatchStream, GenericError>> + Send>>),
+    /// Actively streaming record batches from the server
+    Streaming(Pin<Box<FlightRecordBatchStream>>),
+    /// A retryable error occurred and has been yielded to the consumer
+    ErrorYielded { error: GenericError },
+    /// Waiting during backoff period before retrying the query
+    Sleeping(Pin<Box<dyn Future<Output = ()> + Send>>),
+}
+
 /// A retryable stream for executing SQL queries with Flight.
 ///
 /// This stream automatically handles connection failures and retries queries with exponential backoff.
@@ -243,34 +271,6 @@ impl SqlFlightClient {
 /// - Non-retryable errors are returned immediately without retry attempts
 /// - Only connection resets and specific gRPC errors trigger retries
 ///
-#[allow(clippy::needless_pass_by_value)]
-pub fn query_to_stream_with_params(
-    client: Arc<SqlFlightClient>,
-    sql: &str,
-    params: Option<RecordBatch>,
-) -> RetryableQueryStream {
-    RetryableQueryStream::new(client, sql, params, Duration::from_secs(1))
-}
-
-/// Represents the current state of the `RetryableQueryStream` state machine.
-///
-/// The stream transitions through these states during query execution:
-/// `Ready` → `Executing` → `Streaming` → (on error) → `ErrorYielded` → `Sleeping` → `Ready`
-/// or
-/// `Ready` → `Executing` → (on error) → `ErrorYielded` → `Sleeping` → `Ready`
-enum StreamState {
-    /// Initial state, ready to start or retry a query
-    Ready,
-    /// Query is being executed, waiting for the server to return a stream
-    Executing(Pin<Box<dyn Future<Output = Result<FlightRecordBatchStream, GenericError>> + Send>>),
-    /// Actively streaming record batches from the server
-    Streaming(Pin<Box<FlightRecordBatchStream>>),
-    /// A retryable error occurred and has been yielded to the consumer
-    ErrorYielded { error: GenericError },
-    /// Waiting during backoff period before retrying the query
-    Sleeping(Pin<Box<dyn Future<Output = ()> + Send>>),
-}
-
 pub struct RetryableQueryStream {
     client: Arc<SqlFlightClient>,
     sql: Arc<String>,

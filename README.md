@@ -29,7 +29,7 @@ async fn main() {
     .await
     .unwrap();
 
-  let data = client.query("SELECT trip_distance, total_amount FROM taxi_trips ORDER BY trip_distance DESC LIMIT 10;").await;
+  let data = client.query("SELECT trip_distance, total_amount FROM taxi_trips ORDER BY trip_distance DESC LIMIT 10;");
 }
 ```
 
@@ -65,7 +65,7 @@ async fn main() {
     .await
     .unwrap();
 
-  let data = client.query("SELECT * FROM taxi_trips LIMIT 10;").await;
+  let data = client.query("SELECT * FROM taxi_trips LIMIT 10;");
 }
 ```
 
