@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use tonic::transport::Channel;
 
-const MAX_RETRIES: usize = 3;
+const MAX_RETRIES: u32 = 3;
 
 #[derive(Debug, Snafu)]
 pub enum Error {
@@ -165,7 +165,7 @@ pub struct SpiceClientBuilder {
     user_agent: Option<String>,
     flight_url: Option<String>,
     cache_control: Option<String>,
-    max_retries: usize,
+    max_retries: u32,
 }
 
 impl Default for SpiceClientBuilder {
@@ -209,7 +209,7 @@ impl SpiceClientBuilder {
 
     /// Configures the `SpiceClient` to use the given maximum number of retries.
     #[must_use]
-    pub fn max_retries(mut self, max_retries: usize) -> Self {
+    pub fn max_retries(mut self, max_retries: u32) -> Self {
         self.max_retries = max_retries;
         self
     }

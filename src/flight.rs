@@ -33,7 +33,7 @@ pub struct SqlFlightClient {
     headers: Arc<HashMap<String, String>>,
     client: FlightServiceClient<Channel>,
     api_key: Option<Arc<str>>,
-    max_retries: usize,
+    max_retries: u32,
 }
 
 impl SqlFlightClient {
@@ -42,7 +42,7 @@ impl SqlFlightClient {
         api_key: Option<String>,
         user_agent: Option<String>,
         cache_control: Option<String>,
-        max_retries: usize,
+        max_retries: u32,
     ) -> Self {
         // Prepend the user agent with the provided user agent if it exists
         let user_agent = match user_agent {
@@ -205,7 +205,6 @@ impl SqlFlightClient {
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
 pub fn query_to_stream_with_params(
     client: Arc<SqlFlightClient>,
     sql: &str,
@@ -231,6 +230,8 @@ enum StreamState {
     ErrorYielded { error: GenericError },
     /// Waiting during backoff period before retrying the query
     Sleeping(Pin<Box<dyn Future<Output = ()> + Send>>),
+    /// Terminal state - stream has ended due to non-retryable error
+    Terminated,
 }
 
 /// A retryable stream for executing SQL queries with Flight.
@@ -276,8 +277,8 @@ pub struct RetryableQueryStream {
     sql: Arc<String>,
     params: Arc<Option<RecordBatch>>,
     state: StreamState,
-    max_retries: usize,
-    retry_count: usize,
+    max_retries: u32,
+    retry_count: u32,
     retry_delay: Duration,
 }
 
@@ -300,7 +301,6 @@ impl RetryableQueryStream {
     }
 }
 
-#[allow(clippy::cast_possible_truncation)]
 impl Stream for RetryableQueryStream {
     type Item = Result<RecordBatch, SpiceClientError>;
 
@@ -331,6 +331,7 @@ impl Stream for RetryableQueryStream {
                             self.state = StreamState::ErrorYielded { error };
                             continue;
                         }
+                        self.state = StreamState::Terminated;
                         return Poll::Ready(Some(Err(SpiceClientError::Query { source: error })));
                     }
                     Poll::Pending => return Poll::Pending,
@@ -347,6 +348,7 @@ impl Stream for RetryableQueryStream {
                                 error: error.into(),
                             };
                         } else {
+                            self.state = StreamState::Terminated;
                             return Poll::Ready(Some(Err(SpiceClientError::QueryStream {
                                 source: error,
                             })));
@@ -381,6 +383,9 @@ impl Stream for RetryableQueryStream {
                             return Poll::Pending;
                         }
                     }
+                }
+                StreamState::Terminated => {
+                    return Poll::Ready(None);
                 }
             }
         }
