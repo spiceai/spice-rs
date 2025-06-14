@@ -22,8 +22,6 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::time::sleep;
 use tonic::metadata::AsciiMetadataKey;
 use tonic::transport::Channel;
 use tonic::IntoRequest;
@@ -210,15 +208,17 @@ pub fn query_to_stream_with_params(
     sql: &str,
     params: Option<RecordBatch>,
 ) -> RetryableQueryStream {
-    RetryableQueryStream::new(client, sql, params, Duration::from_secs(1))
+    RetryableQueryStream::new(client, sql, params)
 }
 
 /// Represents the current state of the `RetryableQueryStream` state machine.
 ///
 /// The stream transitions through these states during query execution:
-/// `Ready` → `Executing` → `Streaming` → (on error) → `ErrorYielded` → `Sleeping` → `Ready`
+/// `Ready` → `Executing` → `Streaming` → (on `SpiceClientError::ConnectionReset`) → `ErrorYielded` → `Ready`
 /// or
-/// `Ready` → `Executing` → (on error) → `ErrorYielded` → `Sleeping` → `Ready`
+/// `Ready` → `Executing` → (on `SpiceClientError::ConnectionReset`) → `ErrorYielded` → `Ready`
+/// or
+/// `Ready` → `Executing` → (on other `SpiceClientError`) → `Terminated`.
 enum StreamState {
     /// Initial state, ready to start or retry a query
     Ready,
@@ -228,8 +228,6 @@ enum StreamState {
     Streaming(Pin<Box<FlightRecordBatchStream>>),
     /// A retryable error occurred and has been yielded to the consumer
     ErrorYielded { error: GenericError },
-    /// Waiting during backoff period before retrying the query
-    Sleeping(Pin<Box<dyn Future<Output = ()> + Send>>),
     /// Terminal state - stream has ended due to non-retryable error
     Terminated,
 }
@@ -279,16 +277,10 @@ pub struct RetryableQueryStream {
     state: StreamState,
     max_retries: u32,
     retry_count: u32,
-    retry_delay: Duration,
 }
 
 impl RetryableQueryStream {
-    pub fn new(
-        client: Arc<SqlFlightClient>,
-        sql: &str,
-        params: Option<RecordBatch>,
-        initial_retry_delay: Duration,
-    ) -> Self {
+    pub fn new(client: Arc<SqlFlightClient>, sql: &str, params: Option<RecordBatch>) -> Self {
         Self {
             max_retries: client.max_retries,
             client,
@@ -296,7 +288,6 @@ impl RetryableQueryStream {
             params: Arc::new(params),
             state: StreamState::Ready,
             retry_count: 0,
-            retry_delay: initial_retry_delay,
         }
     }
 }
@@ -305,89 +296,72 @@ impl Stream for RetryableQueryStream {
     type Item = Result<RecordBatch, SpiceClientError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        loop {
-            match &mut self.state {
-                StreamState::Ready => {
-                    let client = Arc::clone(&self.client);
-                    let sql = Arc::clone(&self.sql);
-                    let params = Arc::clone(&self.params);
+        match &mut self.state {
+            StreamState::Ready => {
+                let client = Arc::clone(&self.client);
+                let sql = Arc::clone(&self.sql);
+                let params = Arc::clone(&self.params);
 
-                    let fut = Box::pin(async move {
-                        client
-                            .query_with_params(&sql, params.as_ref().clone())
-                            .await
-                    });
+                let fut = Box::pin(async move {
+                    client
+                        .query_with_params(&sql, params.as_ref().clone())
+                        .await
+                });
 
-                    self.state = StreamState::Executing(fut);
+                self.state = StreamState::Executing(fut);
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+            StreamState::Executing(fut) => match fut.as_mut().poll(cx) {
+                Poll::Ready(Ok(stream)) => {
+                    self.state = StreamState::Streaming(Box::pin(stream));
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
                 }
-                StreamState::Executing(fut) => match fut.as_mut().poll(cx) {
-                    Poll::Ready(Ok(stream)) => {
-                        self.state = StreamState::Streaming(Box::pin(stream));
-                    }
-                    Poll::Ready(Err(error)) => {
-                        if is_connection_reset_generic_error(&error)
-                            && self.retry_count < self.max_retries
-                        {
-                            self.state = StreamState::ErrorYielded { error };
-                            continue;
-                        }
-                        self.state = StreamState::Terminated;
-                        return Poll::Ready(Some(Err(SpiceClientError::Query { source: error })));
-                    }
-                    Poll::Pending => return Poll::Pending,
-                },
-                StreamState::Streaming(stream) => match stream.as_mut().poll_next(cx) {
-                    Poll::Ready(Some(Ok(batch))) => {
-                        return Poll::Ready(Some(Ok(batch)));
-                    }
-                    Poll::Ready(Some(Err(error))) => {
-                        if is_connection_reset_flight_error(&error)
-                            && self.retry_count < self.max_retries
-                        {
-                            self.state = StreamState::ErrorYielded {
-                                error: error.into(),
-                            };
-                        } else {
-                            self.state = StreamState::Terminated;
-                            return Poll::Ready(Some(Err(SpiceClientError::QueryStream {
-                                source: error,
-                            })));
-                        }
-                    }
-                    Poll::Ready(None) => {
-                        return Poll::Ready(None);
-                    }
-                    Poll::Pending => {
+                Poll::Ready(Err(error)) => {
+                    if is_connection_reset_generic_error(&error)
+                        && self.retry_count < self.max_retries
+                    {
+                        self.state = StreamState::ErrorYielded { error };
+                        cx.waker().wake_by_ref();
                         return Poll::Pending;
                     }
-                },
-                StreamState::ErrorYielded { error } => {
-                    let error_message = error.to_string();
-                    self.retry_count += 1;
-
-                    // Exponential delay for retries
-                    let delay = self.retry_delay * (2_u32.pow(self.retry_count as u32 - 1));
-                    self.state = StreamState::Sleeping(Box::pin(sleep(delay)));
-
-                    return Poll::Ready(Some(Err(SpiceClientError::ConnectionReset {
-                        message: error_message,
-                    })));
+                    self.state = StreamState::Terminated;
+                    Poll::Ready(Some(Err(SpiceClientError::Query { source: error })))
                 }
-                StreamState::Sleeping(sleep_fut) => {
-                    match sleep_fut.as_mut().poll(cx) {
-                        Poll::Ready(()) => {
-                            // Sleep completed, go back to ready state for retry
-                            self.state = StreamState::Ready;
-                        }
-                        Poll::Pending => {
-                            return Poll::Pending;
-                        }
+                Poll::Pending => Poll::Pending,
+            },
+            StreamState::Streaming(stream) => match stream.as_mut().poll_next(cx) {
+                Poll::Ready(Some(Ok(batch))) => Poll::Ready(Some(Ok(batch))),
+                Poll::Ready(Some(Err(error))) => {
+                    if is_connection_reset_flight_error(&error)
+                        && self.retry_count < self.max_retries
+                    {
+                        self.state = StreamState::ErrorYielded {
+                            error: error.into(),
+                        };
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    } else {
+                        self.state = StreamState::Terminated;
+                        Poll::Ready(Some(Err(SpiceClientError::QueryStream { source: error })))
                     }
                 }
-                StreamState::Terminated => {
-                    return Poll::Ready(None);
-                }
+                Poll::Ready(None) => Poll::Ready(None),
+                Poll::Pending => Poll::Pending,
+            },
+            StreamState::ErrorYielded { error } => {
+                let error_message = error.to_string();
+                self.retry_count += 1;
+
+                // Immediately go back to ready state for retry
+                self.state = StreamState::Ready;
+
+                Poll::Ready(Some(Err(SpiceClientError::ConnectionReset {
+                    message: error_message,
+                })))
             }
+            StreamState::Terminated => Poll::Ready(None),
         }
     }
 }
