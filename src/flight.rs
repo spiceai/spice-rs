@@ -203,14 +203,6 @@ impl SqlFlightClient {
     }
 }
 
-pub fn query_to_stream_with_params(
-    client: Arc<SqlFlightClient>,
-    sql: &str,
-    params: Option<RecordBatch>,
-) -> RetryableQueryStream {
-    RetryableQueryStream::new(client, sql, params)
-}
-
 /// Represents the current state of the `RetryableQueryStream` state machine.
 ///
 /// The stream transitions through these states during query execution:
@@ -277,13 +269,18 @@ pub struct RetryableQueryStream {
 }
 
 impl RetryableQueryStream {
-    pub fn new(client: Arc<SqlFlightClient>, sql: &str, params: Option<RecordBatch>) -> Self {
+    pub fn new(
+        client: Arc<SqlFlightClient>,
+        sql: &str,
+        params: Option<RecordBatch>,
+        stream: Pin<Box<FlightRecordBatchStream>>,
+    ) -> Self {
         Self {
             max_retries: client.max_retries,
             client,
             sql: Arc::new(sql.to_string()),
             params: Arc::new(params),
-            state: StreamState::Ready,
+            state: StreamState::Streaming(stream),
             retry_count: 0,
         }
     }
@@ -380,7 +377,7 @@ fn is_connection_reset_flight_error(error: &FlightError) -> bool {
     false
 }
 
-fn is_connection_reset_generic_error(error: &GenericError) -> bool {
+pub fn is_connection_reset_generic_error(error: &GenericError) -> bool {
     if let Some(status) = error.downcast_ref::<tonic::Status>() {
         return is_tonic_reset_error(status) || status.metadata().contains_key("spiceai-retryable");
     }

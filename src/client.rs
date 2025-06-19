@@ -1,7 +1,8 @@
-use crate::flight::{query_to_stream_with_params, RetryableQueryStream};
+use crate::flight::RetryableQueryStream;
+use crate::util::{retry, FibonacciBackoffBuilder, RetryError};
 use crate::{
     config::{GenericError, SPICE_CLOUD_FLIGHT_ADDR, SPICE_LOCAL_FLIGHT_ADDR},
-    flight::SqlFlightClient,
+    flight::{is_connection_reset_generic_error, SqlFlightClient},
     tls::{ensure_crypto_provider, new_tls_flight_channel},
 };
 use arrow::record_batch::RecordBatch;
@@ -91,16 +92,36 @@ impl SpiceClient {
     /// # #[tokio::main]
     /// # async fn main() {
     /// #  let client = Client::new("API_KEY").await.unwrap();
-    /// #  let data = client.query("SELECT * FROM taxi_trips LIMIT 10;");
+    /// #  let data = client.query("SELECT * FROM taxi_trips LIMIT 10;").await;
     /// # }
     /// ````
     ///
     /// ## Errors
     ///
     /// - `Box<dyn Error + Send + Sync>` for any query error
-    #[must_use]
-    pub fn query(&self, query: &str) -> RetryableQueryStream {
-        query_to_stream_with_params(Arc::clone(&self.flight), query, None)
+    pub async fn query(&self, query: &str) -> Result<RetryableQueryStream, Error> {
+        let retry_strategy = FibonacciBackoffBuilder::new()
+            .max_retries(Some(MAX_RETRIES as usize))
+            .build();
+
+        retry(retry_strategy, || async {
+            match self.flight.query(query).await {
+                Ok(stream) => Ok(RetryableQueryStream::new(
+                    Arc::clone(&self.flight),
+                    query,
+                    None,
+                    Box::pin(stream),
+                )),
+                Err(e) => {
+                    if is_connection_reset_generic_error(&e) {
+                        return Err(RetryError::transient(e));
+                    }
+                    Err(RetryError::Permanent(e))
+                }
+            }
+        })
+        .await
+        .map_err(|e| Error::Query { source: e })
     }
 
     /// Optional parameterized query with the Spice Flight endpoint with the given SQL query.
@@ -113,20 +134,40 @@ impl SpiceClient {
     /// # #[tokio::main]
     /// # async fn main() {
     /// #  let client = Client::new("API_KEY").await.unwrap();
-    /// #  let data = client.query_with_params("SELECT * FROM taxi_trips LIMIT 10;", None);
+    /// #  let data = client.query_with_params("SELECT * FROM taxi_trips LIMIT 10;", None).await;
     /// # }
     /// ````
     ///
     /// ## Errors
     ///
     /// - `Box<dyn Error + Send + Sync>` for any query error
-    #[must_use]
-    pub fn query_with_params(
+    pub async fn query_with_params(
         &self,
         query: &str,
         params: Option<RecordBatch>,
-    ) -> RetryableQueryStream {
-        query_to_stream_with_params(Arc::clone(&self.flight), query, params)
+    ) -> Result<RetryableQueryStream, Error> {
+        let retry_strategy = FibonacciBackoffBuilder::new()
+            .max_retries(Some(MAX_RETRIES as usize))
+            .build();
+
+        retry(retry_strategy, || async {
+            match self.flight.query_with_params(query, params.clone()).await {
+                Ok(stream) => Ok(RetryableQueryStream::new(
+                    Arc::clone(&self.flight),
+                    query,
+                    params.clone(),
+                    Box::pin(stream),
+                )),
+                Err(e) => {
+                    if is_connection_reset_generic_error(&e) {
+                        return Err(RetryError::transient(e));
+                    }
+                    Err(RetryError::Permanent(e))
+                }
+            }
+        })
+        .await
+        .map_err(|e| Error::Query { source: e })
     }
 }
 
