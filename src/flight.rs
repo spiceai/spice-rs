@@ -204,19 +204,17 @@ impl SqlFlightClient {
 }
 
 /// Represents the current state of the `RetryableQueryStream` state machine.
-///
-/// The stream transitions through these states during query execution:
-/// `Ready` → `Executing` → `Streaming` → `Ready` (retryable error during streaming)
-/// or
-/// `Ready` → `Executing` → `Ready` (retryable error on obtaining stream)
-/// or
-/// `Ready` → `Executing` → `Terminated`. (non-retryable error)
+/// Wraps a `FlightRecordBatchStream` and started from `Streaming` stage.
+/// If a retryable error occurs during streaming, the stream resets and retries.
+/// `Streaming` -> `Ready` → `Executing` → `Streaming` → `Ready`
+/// If a non-retryable error occurs during streaming, the stream will be immediately terminated.
+/// `Streaming` -> `Terminated`. (non-retryable error)
 enum StreamState {
-    /// Initial state, ready to start or retry a query
+    /// Ready to retry a query
     Ready,
     /// Query is being executed, waiting for the server to return a stream
     Executing(Pin<Box<dyn Future<Output = Result<FlightRecordBatchStream, GenericError>> + Send>>),
-    /// Actively streaming record batches from the server
+    /// Initial state, actively streaming record batches from the server
     Streaming(Pin<Box<FlightRecordBatchStream>>),
     /// Terminal state - stream has ended due to non-retryable error
     Terminated,
@@ -224,7 +222,7 @@ enum StreamState {
 
 /// A retryable stream for executing SQL queries with Flight.
 ///
-/// This stream automatically handles connection failures and retries queries with exponential backoff.
+/// This stream automatically handles streaming failures and immediately retries queries.
 /// It yields `RecordBatch` results on success and `SpiceClientError` on failure.
 ///
 /// ## Retry Behavior
@@ -232,7 +230,8 @@ enum StreamState {
 /// When a connection reset occurs during streaming, the stream will:
 /// 1. Yield a `SpiceClientError::ConnectionReset` error to the consumer
 /// 2. If the consumer continues polling, automatically retry the entire query from the beginning
-/// 4. Stop retrying after reaching `max_retries` attempts
+/// 3. If the consumer stops polling, the stream will not retry and enters the `Terminated` state
+/// 4. Stop retrying and enters the `Terminated` state after reaching `max_retries` attempts
 ///
 /// ## Consumer Options
 ///
