@@ -261,7 +261,7 @@ enum StreamState {
 pub struct RetryableQueryStream {
     client: Arc<SqlFlightClient>,
     sql: Arc<String>,
-    params: Arc<Option<RecordBatch>>,
+    params: Option<RecordBatch>,
     state: StreamState,
     max_retries: u32,
     retry_count: u32,
@@ -278,7 +278,7 @@ impl RetryableQueryStream {
             max_retries: client.max_retries,
             client,
             sql: Arc::new(sql.to_string()),
-            params: Arc::new(params),
+            params,
             state: StreamState::Streaming(stream),
             retry_count: 0,
         }
@@ -293,13 +293,9 @@ impl Stream for RetryableQueryStream {
             StreamState::Ready => {
                 let client = Arc::clone(&self.client);
                 let sql = Arc::clone(&self.sql);
-                let params = Arc::clone(&self.params);
+                let params = self.params.clone();
 
-                let fut = Box::pin(async move {
-                    client
-                        .query_with_params(&sql, params.as_ref().clone())
-                        .await
-                });
+                let fut = Box::pin(async move { client.query_with_params(&sql, params).await });
 
                 self.state = StreamState::Executing(fut);
                 cx.waker().wake_by_ref();
@@ -353,13 +349,14 @@ impl Stream for RetryableQueryStream {
 
 pub fn is_tonic_reset_error(error: &tonic::Status) -> bool {
     match error.code() {
-        tonic::Code::Internal | tonic::Code::Cancelled => {
+        tonic::Code::Internal | tonic::Code::Cancelled | tonic::Code::Unknown => {
             let error_message = error.message().to_lowercase();
             if error_message.contains("operation was canceled")
                 || error_message.contains("http2 error")
                 || error_message.contains("grpc-status header missing")
                 || error_message.contains("received message with invalid compression flag")
                 || error_message.contains("error reading a body from connection")
+                || error_message.contains("transport error")
             {
                 return true;
             }
