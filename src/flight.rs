@@ -214,11 +214,11 @@ pub fn query_to_stream_with_params(
 /// Represents the current state of the `RetryableQueryStream` state machine.
 ///
 /// The stream transitions through these states during query execution:
-/// `Ready` → `Executing` → `Streaming` → `Error` (`is_retryable`: True) → `Ready`
+/// `Ready` → `Executing` → `Streaming` → `Ready` (retryable error during streaming)
 /// or
-/// `Ready` → `Executing` → `Error` (`is_retryable`: True) → `Ready`
+/// `Ready` → `Executing` → `Ready` (retryable error on obtaining stream)
 /// or
-/// `Ready` → `Executing` → `Error` (`is_retryable`: False) -> `Terminated`.
+/// `Ready` → `Executing` → `Terminated`. (non-retryable error)
 enum StreamState {
     /// Initial state, ready to start or retry a query
     Ready,
@@ -226,11 +226,6 @@ enum StreamState {
     Executing(Pin<Box<dyn Future<Output = Result<FlightRecordBatchStream, GenericError>> + Send>>),
     /// Actively streaming record batches from the server
     Streaming(Pin<Box<FlightRecordBatchStream>>),
-    /// A retryable error occurred and has been yielded to the consumer
-    Error {
-        error: GenericError,
-        is_retryable: bool,
-    },
     /// Terminal state - stream has ended due to non-retryable error
     Terminated,
 }
@@ -245,7 +240,6 @@ enum StreamState {
 /// When a connection reset occurs during streaming, the stream will:
 /// 1. Yield a `SpiceClientError::ConnectionReset` error to the consumer
 /// 2. If the consumer continues polling, automatically retry the entire query from the beginning
-/// 3. Apply exponential backoff between retries (1s, 2s, 4s, etc.)
 /// 4. Stop retrying after reaching `max_retries` attempts
 ///
 /// ## Consumer Options
@@ -322,51 +316,40 @@ impl Stream for RetryableQueryStream {
                     Poll::Pending
                 }
                 Poll::Ready(Err(error)) => {
-                    let is_retryable = is_connection_reset_generic_error(&error)
-                        && self.retry_count < self.max_retries;
-                    self.state = StreamState::Error {
-                        error,
-                        is_retryable,
-                    };
-                    cx.waker().wake_by_ref();
-                    Poll::Pending
+                    if is_connection_reset_generic_error(&error)
+                        && self.retry_count < self.max_retries
+                    {
+                        self.retry_count += 1;
+                        self.state = StreamState::Ready;
+                        cx.waker().wake_by_ref();
+                        return Poll::Ready(Some(Err(SpiceClientError::ConnectionReset {
+                            message: error.to_string(),
+                        })));
+                    }
+                    self.state = StreamState::Terminated;
+                    Poll::Ready(Some(Err(SpiceClientError::Query { source: error })))
                 }
                 Poll::Pending => Poll::Pending,
             },
             StreamState::Streaming(stream) => match stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(batch))) => Poll::Ready(Some(Ok(batch))),
                 Poll::Ready(Some(Err(error))) => {
-                    let is_retryable = is_connection_reset_flight_error(&error)
-                        && self.retry_count < self.max_retries;
-                    self.state = StreamState::Error {
-                        error: error.into(),
-                        is_retryable,
-                    };
-                    cx.waker().wake_by_ref();
-                    Poll::Pending
+                    if is_connection_reset_flight_error(&error)
+                        && self.retry_count < self.max_retries
+                    {
+                        self.retry_count += 1;
+                        self.state = StreamState::Ready;
+                        cx.waker().wake_by_ref();
+                        return Poll::Ready(Some(Err(SpiceClientError::ConnectionReset {
+                            message: error.to_string(),
+                        })));
+                    }
+                    self.state = StreamState::Terminated;
+                    Poll::Ready(Some(Err(SpiceClientError::QueryStream { source: error })))
                 }
                 Poll::Ready(None) => Poll::Ready(None),
                 Poll::Pending => Poll::Pending,
             },
-            StreamState::Error {
-                error,
-                is_retryable,
-            } => {
-                let error_message = error.to_string();
-
-                if *is_retryable {
-                    self.retry_count += 1;
-                    self.state = StreamState::Ready;
-                    Poll::Ready(Some(Err(SpiceClientError::ConnectionReset {
-                        message: error_message,
-                    })))
-                } else {
-                    self.state = StreamState::Terminated;
-                    Poll::Ready(Some(Err(SpiceClientError::Query {
-                        message: error_message,
-                    })))
-                }
-            }
             StreamState::Terminated => Poll::Ready(None),
         }
     }

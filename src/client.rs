@@ -5,6 +5,7 @@ use crate::{
     tls::{ensure_crypto_provider, new_tls_flight_channel},
 };
 use arrow::record_batch::RecordBatch;
+use arrow_flight::error::FlightError;
 use snafu::Snafu;
 use std::sync::Arc;
 
@@ -14,8 +15,13 @@ const MAX_RETRIES: u32 = 3;
 
 #[derive(Debug, Snafu)]
 pub enum Error {
-    #[snafu(display("Query execution failed: {message}"))]
-    Query { message: String },
+    #[snafu(display("Query execution failed: {source}"))]
+    Query {
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    #[snafu(display("Failed to process query stream: {source}"))]
+    QueryStream { source: FlightError },
 
     #[snafu(display("Connection reset: {message}\nPlease retry the query."))]
     ConnectionReset { message: String },
