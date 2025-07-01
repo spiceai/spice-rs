@@ -32,8 +32,8 @@ assignees: ''
 - [ ] Run [Test CI](https://github.com/spiceai/spice-rs/actions/workflows/build.yml) and ensure it is green on the trunk branch.
 - [ ] QA DRI sign-off
 - [ ] Docs DRI sign-off
-- [ ] Create a new branch `release-v[semver]` for the release from trunk. E.g. `release-v0.17.0-beta`
-- [ ] Release the new version by creating and publishing a latest [GitHub Release](https://github.com/spiceai/spice-rs/releases/new) with the tag from the release branch. E.g. `v0.17.0-beta`.
+- [ ] Create a new branch `release-v[semver]` for the release from trunk. E.g. `release-v3.0.0`
+- [ ] Release the new version by creating and publishing a latest [GitHub Release](https://github.com/spiceai/spice-rs/releases/new) with the tag from the release branch. E.g. `v3.0.0`.
 - [ ] Ensure the [publish](https://github.com/spiceai/spice-rs/actions/workflows/publish.yml) workflow has triggered, and successfully published the package.
 - [ ] Run a test pass using the [`spice-rs` sample](https://github.com/spiceai/samples/tree/trunk/client-sdk/spice-rs-sdk-sample) using the latest published version.
 - [ ] Update the version in `Cargo.toml` to the next release version.
