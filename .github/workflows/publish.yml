@@ -15,13 +15,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: rust-lang/crates-io-auth-action@v1
+      # Using a tag for a 3rd party Action that is not pinned to a commit can lead to executing an untrusted Action through a supply chain attack.
+      # https://github.com/rust-lang/crates-io-auth-action/releases/tag/v1.0.1
+      - uses: rust-lang/crates-io-auth-action@e919bc7605cde86df457cf5b93c5e103838bd879
         id: auth
 
       - name: Install Rust toolchain
-        # Using a tag for a 3rd party Action that is not pinned to a commit can lead to executing an untrusted Action through a supply chain attack.
-        # https://github.com/rust-lang/crates-io-auth-action/releases/tag/v1.0.1
-        uses: actions-rs/toolchain@e919bc7605cde86df457cf5b93c5e103838bd879
+        uses: actions-rs/toolchain@v1
         with:
           profile: minimal
           toolchain: stable
