@@ -10,8 +10,13 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     environment: cratesio
+    permissions:
+      id-token: write # Required for OIDC token exchange with crates.io
     steps:
       - uses: actions/checkout@v4
+
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
 
       - name: Install Rust toolchain
         uses: actions-rs/toolchain@v1
@@ -24,4 +29,4 @@ jobs:
 
       - run: cargo publish
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
