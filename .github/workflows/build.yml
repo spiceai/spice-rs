@@ -61,13 +61,10 @@ jobs:
           [
             ubuntu-latest,
             ubuntu-22.04,
-            ubuntu-20.04,
             macos-latest,
             macos-14,
-            macos-13,
             windows-latest,
             windows-2022,
-            windows-2019,
           ]
         toolchain:
           - stable
