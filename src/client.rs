@@ -1,4 +1,5 @@
 use crate::flight::RetryableQueryStream;
+use crate::query::{QueryError, QueryHttpClient, QueryJob};
 use crate::util::{FibonacciBackoffBuilder, RetryError, retry};
 use crate::{
     config::{GenericError, SPICE_CLOUD_FLIGHT_ADDR, SPICE_LOCAL_FLIGHT_ADDR},
@@ -50,6 +51,7 @@ impl SpiceClientConfig {
 #[derive(Clone)]
 pub struct SpiceClient {
     flight: Arc<SqlFlightClient>,
+    http_client: Option<Arc<QueryHttpClient>>,
 }
 
 impl SpiceClient {
@@ -78,6 +80,7 @@ impl SpiceClient {
                 None,
                 MAX_RETRIES,
             )),
+            http_client: None,
         })
     }
 
@@ -86,20 +89,24 @@ impl SpiceClient {
         SpiceClientBuilder::new()
     }
 
-    /// Queries the Spice Flight endpoint with the given SQL query.
+    /// Executes a synchronous SQL query against the Spice Flight endpoint.
+    ///
+    /// This method executes the query immediately and returns a stream of record batches.
+    /// For long-running queries, consider using [`query()`](Self::query) for async execution.
+    ///
     /// ```
     /// # use spiceai::Client;
     /// # #[tokio::main]
     /// # async fn main() {
     /// #  let client = Client::new("API_KEY").await.unwrap();
-    /// #  let data = client.query("SELECT * FROM taxi_trips LIMIT 10;").await;
+    /// #  let data = client.sql("SELECT * FROM taxi_trips LIMIT 10;").await;
     /// # }
     /// ````
     ///
     /// ## Errors
     ///
     /// - `Box<dyn Error + Send + Sync>` for any query error
-    pub async fn query(&self, query: &str) -> Result<RetryableQueryStream, Error> {
+    pub async fn sql(&self, query: &str) -> Result<RetryableQueryStream, Error> {
         let retry_strategy = FibonacciBackoffBuilder::new()
             .max_retries(Some(MAX_RETRIES as usize))
             .build();
@@ -124,24 +131,28 @@ impl SpiceClient {
         .map_err(|e| Error::Query { source: e })
     }
 
-    /// Optional parameterized query with the Spice Flight endpoint with the given SQL query.
-    /// /// If `params` is `None`, it behaves like a regular query.
+    /// Executes a synchronous parameterized SQL query against the Spice Flight endpoint.
+    ///
+    /// If `params` is `None`, it behaves like [`sql()`](Self::sql).
     /// `params` is a parameter binding `RecordBatch`.
     /// <https://docs.rs/arrow-flight/latest/arrow_flight/sql/client/struct.PreparedStatement.html#method.set_parameters>
+    ///
+    /// For long-running queries, consider using [`query()`](Self::query) for async execution.
+    ///
     /// ```
     /// # use spiceai::Client;
     /// #
     /// # #[tokio::main]
     /// # async fn main() {
     /// #  let client = Client::new("API_KEY").await.unwrap();
-    /// #  let data = client.query_with_params("SELECT * FROM taxi_trips LIMIT 10;", None).await;
+    /// #  let data = client.sql_with_params("SELECT * FROM taxi_trips LIMIT 10;", None).await;
     /// # }
     /// ````
     ///
     /// ## Errors
     ///
     /// - `Box<dyn Error + Send + Sync>` for any query error
-    pub async fn query_with_params(
+    pub async fn sql_with_params(
         &self,
         query: &str,
         params: Option<RecordBatch>,
@@ -168,6 +179,58 @@ impl SpiceClient {
         })
         .await
         .map_err(|e| Error::Query { source: e })
+    }
+
+    /// Submits an async SQL query and returns a [`QueryJob`] handle.
+    ///
+    /// This method submits the query to the `/v1/queries` API for asynchronous execution
+    /// and returns immediately with a job handle. Use the returned [`QueryJob`] to:
+    /// - Check status with [`QueryJob::status()`]
+    /// - Wait for completion with [`QueryJob::wait()`] or [`QueryJob::wait_timeout()`]
+    /// - Retrieve results with [`QueryJob::results()`]
+    /// - Cancel the query with [`QueryJob::cancel()`]
+    ///
+    /// **Note:** Requires [`http_url()`](SpiceClientBuilder::http_url) to be configured.
+    /// Async queries require cluster mode with `scheduler.state_location` configured.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use spiceai::ClientBuilder;
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let client = ClientBuilder::new()
+    ///     .http_url("http://localhost:8090")
+    ///     .build()
+    ///     .await?;
+    ///
+    /// // Submit async query
+    /// let job = client.query("SELECT * FROM large_table").await?;
+    /// println!("Query submitted: {}", job.id());
+    ///
+    /// // Wait for completion
+    /// let result = job.wait().await?;
+    /// println!("Completed with {} rows", result.total_rows);
+    ///
+    /// // Get results as Arrow record batches
+    /// let batches = job.results().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// - [`QueryError::ClusterModeRequired`] if async queries are not enabled
+    /// - [`QueryError::SubmitFailed`] if the query submission fails
+    /// - [`QueryError::HttpError`] if the HTTP endpoint is not configured or unreachable
+    pub async fn query(&self, sql: &str) -> Result<QueryJob, QueryError> {
+        let http_client = self.http_client.as_ref().ok_or(QueryError::HttpError {
+            message: "HTTP endpoint not configured. Use ClientBuilder::http_url() to set it."
+                .to_string(),
+        })?;
+
+        let response = http_client.submit(sql).await?;
+        Ok(QueryJob::new(response.query_id, Arc::clone(http_client)))
     }
 }
 
@@ -205,6 +268,7 @@ pub struct SpiceClientBuilder {
     api_key: Option<String>,
     user_agent: Option<String>,
     flight_url: Option<String>,
+    http_url: Option<String>,
     cache_control: Option<String>,
     max_retries: u32,
 }
@@ -222,6 +286,7 @@ impl SpiceClientBuilder {
             api_key: None,
             user_agent: None,
             flight_url: None,
+            http_url: None,
             cache_control: None,
             max_retries: MAX_RETRIES,
         }
@@ -270,6 +335,17 @@ impl SpiceClientBuilder {
         self
     }
 
+    /// Configures the HTTP endpoint for async query API (`/v1/queries`).
+    ///
+    /// This endpoint is required for using the async [`SpiceClient::query()`] method.
+    /// Typically this is `http://localhost:8090` for local development or the
+    /// HTTP API endpoint for your Spice.ai cluster.
+    #[must_use]
+    pub fn http_url(mut self, http_url: &str) -> Self {
+        self.http_url = Some(http_url.to_string());
+        self
+    }
+
     /// Builds the `SpiceClient` with the specified configuration.
     ///
     /// ## Errors
@@ -282,6 +358,10 @@ impl SpiceClientBuilder {
             None => new_tls_flight_channel(SPICE_LOCAL_FLIGHT_ADDR).await?,
         };
 
+        let http_client = self
+            .http_url
+            .map(|url| Arc::new(QueryHttpClient::new(&url, self.api_key.clone())));
+
         Ok(SpiceClient {
             flight: Arc::new(SqlFlightClient::new(
                 flight_channel,
@@ -290,6 +370,7 @@ impl SpiceClientBuilder {
                 self.cache_control.clone(),
                 self.max_retries,
             )),
+            http_client,
         })
     }
 }
@@ -304,6 +385,7 @@ mod tests {
         assert!(builder.api_key.is_none());
         assert!(builder.user_agent.is_none());
         assert!(builder.flight_url.is_none());
+        assert!(builder.http_url.is_none());
         assert!(builder.cache_control.is_none());
         assert_eq!(builder.max_retries, MAX_RETRIES);
     }
@@ -314,6 +396,7 @@ mod tests {
         assert!(builder.api_key.is_none());
         assert!(builder.user_agent.is_none());
         assert!(builder.flight_url.is_none());
+        assert!(builder.http_url.is_none());
         assert!(builder.cache_control.is_none());
         assert_eq!(builder.max_retries, MAX_RETRIES);
     }
@@ -337,6 +420,12 @@ mod tests {
             builder.flight_url,
             Some("https://custom.endpoint.io".to_string())
         );
+    }
+
+    #[test]
+    fn test_client_builder_http_url() {
+        let builder = SpiceClientBuilder::new().http_url("http://localhost:8090");
+        assert_eq!(builder.http_url, Some("http://localhost:8090".to_string()));
     }
 
     #[test]
