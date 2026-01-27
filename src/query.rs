@@ -35,10 +35,13 @@
 
 use arrow::array::RecordBatch;
 use arrow::ipc::reader::StreamReader;
+use futures::Stream;
 use serde::{Deserialize, Serialize};
 use snafu::Snafu;
 use std::io::Cursor;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 /// Default poll interval for checking query status.
@@ -48,8 +51,13 @@ pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 #[derive(Debug, Snafu)]
 pub enum QueryError {
     /// Failed to submit the query.
-    #[snafu(display("Failed to submit query: {message}"))]
-    SubmitFailed { message: String },
+    #[snafu(display("Failed to submit query (HTTP {status_code}): {response_body}"))]
+    SubmitFailed {
+        /// HTTP status code returned by the server.
+        status_code: u16,
+        /// Response body from the server.
+        response_body: String,
+    },
 
     /// Query was not found on the server.
     #[snafu(display("Query not found: {query_id}"))]
@@ -71,7 +79,16 @@ pub enum QueryError {
     #[snafu(display("Query was cancelled: {query_id}"))]
     Cancelled { query_id: String },
 
-    /// HTTP request failed.
+    /// HTTP request failed with an error response.
+    #[snafu(display("HTTP request failed (HTTP {status_code}): {response_body}"))]
+    HttpRequestFailed {
+        /// HTTP status code returned by the server.
+        status_code: u16,
+        /// Response body from the server.
+        response_body: String,
+    },
+
+    /// HTTP transport error.
     #[snafu(display("HTTP request failed: {message}"))]
     HttpError { message: String },
 
@@ -211,6 +228,130 @@ pub struct QueryListResponse {
     pub queries: Vec<QuerySummary>,
 }
 
+/// Represents the current state of the `QueryResultStream` state machine.
+enum ResultStreamState {
+    /// Ready to fetch the next chunk. Contains the chunk index to fetch after this one completes.
+    FetchingChunk {
+        future:
+            Pin<Box<dyn std::future::Future<Output = Result<Vec<RecordBatch>, QueryError>> + Send>>,
+        next_chunk_after: u64,
+    },
+    /// Yielding batches from the current chunk.
+    YieldingBatches {
+        batches: std::vec::IntoIter<RecordBatch>,
+        next_chunk: u64,
+    },
+    /// Stream has completed.
+    Completed,
+}
+
+/// A stream of `RecordBatch` results from an async query.
+///
+/// This stream fetches result chunks lazily, yielding record batches as they are
+/// retrieved from the server. This avoids loading all results into memory at once.
+///
+/// # Example
+///
+/// ```no_run
+/// use futures::StreamExt;
+/// use spiceai::ClientBuilder;
+///
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let client = ClientBuilder::new()
+///     .http_url("http://localhost:8090")
+///     .build()
+///     .await?;
+///
+/// let job = client.query("SELECT * FROM large_table").await?;
+/// job.wait().await?;
+///
+/// // Stream results without loading all into memory
+/// let mut stream = job.results_stream().await?;
+/// while let Some(result) = stream.next().await {
+///     let batch = result?;
+///     println!("Got batch with {} rows", batch.num_rows());
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub struct QueryResultStream {
+    client: Arc<QueryHttpClient>,
+    query_id: String,
+    total_chunks: u64,
+    state: ResultStreamState,
+}
+
+impl QueryResultStream {
+    fn new(client: Arc<QueryHttpClient>, query_id: String, total_chunks: u64) -> Self {
+        // Start by yielding from an empty iterator, which will trigger fetching chunk 0
+        Self {
+            client,
+            query_id,
+            total_chunks,
+            state: ResultStreamState::YieldingBatches {
+                batches: Vec::new().into_iter(),
+                next_chunk: 0,
+            },
+        }
+    }
+}
+
+impl Stream for QueryResultStream {
+    type Item = Result<RecordBatch, QueryError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            match &mut self.state {
+                ResultStreamState::FetchingChunk {
+                    future,
+                    next_chunk_after,
+                } => match future.as_mut().poll(cx) {
+                    Poll::Ready(Ok(batches)) => {
+                        let next_chunk = *next_chunk_after;
+                        self.state = ResultStreamState::YieldingBatches {
+                            batches: batches.into_iter(),
+                            next_chunk,
+                        };
+                    }
+                    Poll::Ready(Err(e)) => {
+                        self.state = ResultStreamState::Completed;
+                        return Poll::Ready(Some(Err(e)));
+                    }
+                    Poll::Pending => return Poll::Pending,
+                },
+                ResultStreamState::YieldingBatches {
+                    batches,
+                    next_chunk,
+                } => {
+                    if let Some(batch) = batches.next() {
+                        return Poll::Ready(Some(Ok(batch)));
+                    }
+                    // Current chunk exhausted, fetch next if available
+                    let chunk_to_fetch = *next_chunk;
+                    if chunk_to_fetch >= self.total_chunks {
+                        self.state = ResultStreamState::Completed;
+                        return Poll::Ready(None);
+                    }
+                    let client = Arc::clone(&self.client);
+                    let query_id = self.query_id.clone();
+                    #[allow(clippy::cast_possible_truncation)]
+                    let fut = Box::pin(async move {
+                        client
+                            .get_results_arrow(&query_id, chunk_to_fetch as usize)
+                            .await
+                    });
+                    self.state = ResultStreamState::FetchingChunk {
+                        future: fut,
+                        next_chunk_after: chunk_to_fetch + 1,
+                    };
+                }
+                ResultStreamState::Completed => return Poll::Ready(None),
+            }
+        }
+    }
+}
+
 /// HTTP client configuration for async queries.
 #[derive(Clone)]
 pub(crate) struct QueryHttpClient {
@@ -257,11 +398,11 @@ impl QueryHttpClient {
                 message: e.to_string(),
             }),
             503 => Err(QueryError::ClusterModeRequired),
-            _ => {
-                let status = response.status();
-                let text = response.text().await.unwrap_or_default();
+            status_code => {
+                let response_body = response.text().await.unwrap_or_default();
                 Err(QueryError::SubmitFailed {
-                    message: format!("HTTP {status}: {text}"),
+                    status_code,
+                    response_body,
                 })
             }
         }
@@ -285,11 +426,11 @@ impl QueryHttpClient {
             404 => Err(QueryError::NotFound {
                 query_id: query_id.to_string(),
             }),
-            _ => {
-                let status = response.status();
-                let text = response.text().await.unwrap_or_default();
-                Err(QueryError::HttpError {
-                    message: format!("HTTP {status}: {text}"),
+            status_code => {
+                let response_body = response.text().await.unwrap_or_default();
+                Err(QueryError::HttpRequestFailed {
+                    status_code,
+                    response_body,
                 })
             }
         }
@@ -316,11 +457,11 @@ impl QueryHttpClient {
             410 => Err(QueryError::Expired {
                 query_id: query_id.to_string(),
             }),
-            _ => {
-                let status = response.status();
-                let text = response.text().await.unwrap_or_default();
-                Err(QueryError::HttpError {
-                    message: format!("HTTP {status}: {text}"),
+            status_code => {
+                let response_body = response.text().await.unwrap_or_default();
+                Err(QueryError::HttpRequestFailed {
+                    status_code,
+                    response_body,
                 })
             }
         }
@@ -358,11 +499,11 @@ impl QueryHttpClient {
             409 | 425 => Err(QueryError::NotReady {
                 query_id: query_id.to_string(),
             }),
-            _ => {
-                let status = response.status();
-                let text = response.text().await.unwrap_or_default();
-                Err(QueryError::HttpError {
-                    message: format!("HTTP {status}: {text}"),
+            status_code => {
+                let response_body = response.text().await.unwrap_or_default();
+                Err(QueryError::HttpRequestFailed {
+                    status_code,
+                    response_body,
                 })
             }
         }
@@ -402,11 +543,11 @@ impl QueryHttpClient {
             409 | 425 => Err(QueryError::NotReady {
                 query_id: query_id.to_string(),
             }),
-            _ => {
-                let status = response.status();
-                let text = response.text().await.unwrap_or_default();
-                Err(QueryError::HttpError {
-                    message: format!("HTTP {status}: {text}"),
+            status_code => {
+                let response_body = response.text().await.unwrap_or_default();
+                Err(QueryError::HttpRequestFailed {
+                    status_code,
+                    response_body,
                 })
             }
         }
@@ -430,14 +571,15 @@ impl QueryHttpClient {
             404 => Err(QueryError::NotFound {
                 query_id: query_id.to_string(),
             }),
-            409 => Err(QueryError::HttpError {
-                message: format!("Query {query_id} has already completed"),
+            409 => Err(QueryError::HttpRequestFailed {
+                status_code: 409,
+                response_body: format!("Query {query_id} has already completed"),
             }),
-            _ => {
-                let status = response.status();
-                let text = response.text().await.unwrap_or_default();
-                Err(QueryError::HttpError {
-                    message: format!("HTTP {status}: {text}"),
+            status_code => {
+                let response_body = response.text().await.unwrap_or_default();
+                Err(QueryError::HttpRequestFailed {
+                    status_code,
+                    response_body,
                 })
             }
         }
@@ -491,11 +633,11 @@ impl QueryHttpClient {
                 })
             }
             503 => Err(QueryError::ClusterModeRequired),
-            _ => {
-                let status = response.status();
-                let text = response.text().await.unwrap_or_default();
-                Err(QueryError::HttpError {
-                    message: format!("HTTP {status}: {text}"),
+            status_code => {
+                let response_body = response.text().await.unwrap_or_default();
+                Err(QueryError::HttpRequestFailed {
+                    status_code,
+                    response_body,
                 })
             }
         }
@@ -767,6 +909,47 @@ impl QueryJob {
     ///
     /// Returns an error if the query is not complete, not found, or results have expired.
     pub async fn results(&self) -> Result<Vec<RecordBatch>, QueryError> {
+        use futures::TryStreamExt;
+        let stream = self.results_stream().await?;
+        stream.try_collect().await
+    }
+
+    /// Returns a stream of `RecordBatch` results from a completed query.
+    ///
+    /// This method returns a stream that fetches result chunks lazily, yielding
+    /// record batches as they are retrieved from the server. This avoids loading
+    /// all results into memory at once, making it suitable for large result sets.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use futures::StreamExt;
+    /// use spiceai::ClientBuilder;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let client = ClientBuilder::new()
+    ///     .http_url("http://localhost:8090")
+    ///     .build()
+    ///     .await?;
+    ///
+    /// let job = client.query("SELECT * FROM large_table").await?;
+    /// job.wait().await?;
+    ///
+    /// // Stream results without loading all into memory
+    /// let mut stream = job.results_stream().await?;
+    /// while let Some(result) = stream.next().await {
+    ///     let batch = result?;
+    ///     println!("Got batch with {} rows", batch.num_rows());
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query is not complete, not found, or results have expired.
+    pub async fn results_stream(&self) -> Result<QueryResultStream, QueryError> {
         let info = self.info().await?;
 
         if !info.status.is_success() {
@@ -777,21 +960,11 @@ impl QueryJob {
 
         let total_chunks = info.result.map_or(1, |r| r.total_chunks);
 
-        let mut all_batches = Vec::new();
-        #[allow(clippy::cast_possible_truncation)]
-        for chunk_index in 0..total_chunks {
-            let batches = self.results_chunk(chunk_index as usize).await?;
-            all_batches.extend(batches);
-        }
-
-        Ok(all_batches)
-    }
-
-    /// Retrieves a specific result chunk as Arrow record batches.
-    async fn results_chunk(&self, chunk_index: usize) -> Result<Vec<RecordBatch>, QueryError> {
-        self.client
-            .get_results_arrow(&self.query_id, chunk_index)
-            .await
+        Ok(QueryResultStream::new(
+            Arc::clone(&self.client),
+            self.query_id.clone(),
+            total_chunks,
+        ))
     }
 
     /// Cancels the query.

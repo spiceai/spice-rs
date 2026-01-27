@@ -11,7 +11,8 @@ pub use client::Error as SpiceClientError;
 pub use client::SpiceClient as Client;
 pub use client::SpiceClientBuilder as ClientBuilder;
 pub use query::{
-    QueryError, QueryInfo, QueryJob, QueryListResponse, QueryResult, QueryStatus, QuerySummary,
+    QueryError, QueryInfo, QueryJob, QueryListResponse, QueryResult, QueryResultStream,
+    QueryStatus, QuerySummary,
 };
 
 // Further public exports and integrations
