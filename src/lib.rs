@@ -10,7 +10,9 @@ mod util;
 pub use client::Error as SpiceClientError;
 pub use client::SpiceClient as Client;
 pub use client::SpiceClientBuilder as ClientBuilder;
-pub use query::{QueryError, QueryInfo, QueryJob, QueryResult, QueryStatus};
+pub use query::{
+    QueryError, QueryInfo, QueryJob, QueryListResponse, QueryResult, QueryStatus, QuerySummary,
+};
 
 // Further public exports and integrations
 pub use futures::StreamExt;

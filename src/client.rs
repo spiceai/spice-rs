@@ -232,6 +232,143 @@ impl SpiceClient {
         let response = http_client.submit(sql).await?;
         Ok(QueryJob::new(response.query_id, Arc::clone(http_client)))
     }
+
+    /// Lists async queries on the server.
+    ///
+    /// **Note:** Requires [`http_url()`](SpiceClientBuilder::http_url) to be configured.
+    ///
+    /// # Arguments
+    ///
+    /// * `status_filter` - Optional filter by status: "pending", "running", "succeeded", "failed", "cancelled"
+    /// * `limit` - Optional maximum number of queries to return (default: 100)
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use spiceai::ClientBuilder;
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let client = ClientBuilder::new()
+    ///     .http_url("http://localhost:8090")
+    ///     .build()
+    ///     .await?;
+    ///
+    /// // List all queries
+    /// let queries = client.queries(None, None).await?;
+    /// for q in &queries.queries {
+    ///     println!("{}: {} - {}", q.query_id, q.state, q.sql_preview);
+    /// }
+    ///
+    /// // List only running queries
+    /// let running = client.queries(Some("running"), Some(10)).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// - [`QueryError::ClusterModeRequired`] if async queries are not enabled
+    /// - [`QueryError::HttpError`] if the HTTP endpoint is not configured or unreachable
+    pub async fn queries(
+        &self,
+        status_filter: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<crate::query::QueryListResponse, QueryError> {
+        let http_client = self.http_client.as_ref().ok_or(QueryError::HttpError {
+            message: "HTTP endpoint not configured. Use ClientBuilder::http_url() to set it."
+                .to_string(),
+        })?;
+
+        http_client.list_queries(status_filter, limit).await
+    }
+
+    /// Gets a [`QueryJob`] handle for an existing query by ID.
+    ///
+    /// This allows you to resume tracking a query that was submitted earlier,
+    /// check its status, retrieve results, or cancel it.
+    ///
+    /// **Note:** Requires [`http_url()`](SpiceClientBuilder::http_url) to be configured.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use spiceai::ClientBuilder;
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let client = ClientBuilder::new()
+    ///     .http_url("http://localhost:8090")
+    ///     .build()
+    ///     .await?;
+    ///
+    /// // Get a handle for an existing query
+    /// let job = client.get_query("qry_abc123")?;
+    ///
+    /// // Check its status
+    /// let status = job.status().await?;
+    /// println!("Status: {}", status);
+    ///
+    /// // Wait and get results if still running
+    /// if status.is_running() {
+    ///     let result = job.wait().await?;
+    ///     let batches = job.results().await?;
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// - [`QueryError::HttpError`] if the HTTP endpoint is not configured
+    pub fn get_query(&self, query_id: &str) -> Result<QueryJob, QueryError> {
+        let http_client = self.http_client.as_ref().ok_or(QueryError::HttpError {
+            message: "HTTP endpoint not configured. Use ClientBuilder::http_url() to set it."
+                .to_string(),
+        })?;
+
+        Ok(QueryJob::new(query_id.to_string(), Arc::clone(http_client)))
+    }
+
+    /// Cancels an async query by ID.
+    ///
+    /// This is a convenience method equivalent to calling [`get_query()`](Self::get_query)
+    /// followed by [`QueryJob::cancel()`].
+    ///
+    /// **Note:** Requires [`http_url()`](SpiceClientBuilder::http_url) to be configured.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use spiceai::ClientBuilder;
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let client = ClientBuilder::new()
+    ///     .http_url("http://localhost:8090")
+    ///     .build()
+    ///     .await?;
+    ///
+    /// // Cancel a query by ID
+    /// let info = client.cancel_query("qry_abc123").await?;
+    /// println!("Query {} cancelled", info.query_id);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// - [`QueryError::NotFound`] if the query does not exist
+    /// - [`QueryError::HttpError`] if the query has already completed or the endpoint is not configured
+    pub async fn cancel_query(
+        &self,
+        query_id: &str,
+    ) -> Result<crate::query::QueryInfo, QueryError> {
+        let http_client = self.http_client.as_ref().ok_or(QueryError::HttpError {
+            message: "HTTP endpoint not configured. Use ClientBuilder::http_url() to set it."
+                .to_string(),
+        })?;
+
+        let job = QueryJob::new(query_id.to_string(), Arc::clone(http_client));
+        job.cancel().await
+    }
 }
 
 /// Builder for creating a `SpiceClient`.

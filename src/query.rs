@@ -191,6 +191,26 @@ pub struct QueryErrorInfo {
     pub message: String,
 }
 
+/// Summary of a query for listing.
+#[derive(Debug, Clone)]
+pub struct QuerySummary {
+    /// The query ID.
+    pub query_id: String,
+    /// Current state of the query.
+    pub state: String,
+    /// When the query was created.
+    pub created_at: String,
+    /// Preview of the SQL query (may be truncated).
+    pub sql_preview: String,
+}
+
+/// Response from listing queries.
+#[derive(Debug, Clone)]
+pub struct QueryListResponse {
+    /// List of queries.
+    pub queries: Vec<QuerySummary>,
+}
+
 /// HTTP client configuration for async queries.
 #[derive(Clone)]
 pub(crate) struct QueryHttpClient {
@@ -422,6 +442,64 @@ impl QueryHttpClient {
             }
         }
     }
+
+    /// List queries with optional status filter and limit.
+    pub async fn list_queries(
+        &self,
+        status_filter: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<QueryListResponse, QueryError> {
+        let mut url = format!("{}/v1/queries", self.base_url);
+
+        let mut params = Vec::new();
+        if let Some(status) = status_filter {
+            params.push(format!("status={status}"));
+        }
+        if let Some(limit) = limit {
+            params.push(format!("limit={limit}"));
+        }
+        if !params.is_empty() {
+            url = format!("{url}?{}", params.join("&"));
+        }
+
+        let response = self
+            .add_auth(self.client.get(&url))
+            .send()
+            .await
+            .map_err(|e| QueryError::HttpError {
+                message: e.to_string(),
+            })?;
+
+        match response.status().as_u16() {
+            200 => {
+                let list_response: ListQueriesApiResponse =
+                    response.json().await.map_err(|e| QueryError::ParseError {
+                        message: e.to_string(),
+                    })?;
+
+                Ok(QueryListResponse {
+                    queries: list_response
+                        .queries
+                        .into_iter()
+                        .map(|q| QuerySummary {
+                            query_id: q.query_id,
+                            state: q.state,
+                            created_at: q.created_at,
+                            sql_preview: q.sql_preview,
+                        })
+                        .collect(),
+                })
+            }
+            503 => Err(QueryError::ClusterModeRequired),
+            _ => {
+                let status = response.status();
+                let text = response.text().await.unwrap_or_default();
+                Err(QueryError::HttpError {
+                    message: format!("HTTP {status}: {text}"),
+                })
+            }
+        }
+    }
 }
 
 /// Parse Arrow IPC stream data into record batches.
@@ -498,6 +576,19 @@ pub(crate) struct ResultChunkResponse {
     pub chunk_index: usize,
     pub row_count: usize,
     pub data: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ListQueriesApiResponse {
+    pub queries: Vec<QuerySummaryApiResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct QuerySummaryApiResponse {
+    pub query_id: String,
+    pub state: String,
+    pub created_at: String,
+    pub sql_preview: String,
 }
 
 impl StatusResponse {
@@ -689,10 +780,7 @@ impl QueryJob {
         let mut all_batches = Vec::new();
         #[allow(clippy::cast_possible_truncation)]
         for chunk_index in 0..total_chunks {
-            let batches = self
-                .client
-                .get_results_arrow(&self.query_id, chunk_index as usize)
-                .await?;
+            let batches = self.results_chunk(chunk_index as usize).await?;
             all_batches.extend(batches);
         }
 
@@ -700,11 +788,7 @@ impl QueryJob {
     }
 
     /// Retrieves a specific result chunk as Arrow record batches.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the chunk is not found or the query is not complete.
-    pub async fn results_chunk(&self, chunk_index: usize) -> Result<Vec<RecordBatch>, QueryError> {
+    async fn results_chunk(&self, chunk_index: usize) -> Result<Vec<RecordBatch>, QueryError> {
         self.client
             .get_results_arrow(&self.query_id, chunk_index)
             .await
