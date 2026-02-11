@@ -58,6 +58,8 @@ mod tests {
         )
     }
 
+    // skip on Windows as we do not provide a spice runtime for Windows
+    #[cfg(not(target_os = "windows"))]
     #[tokio::test]
     async fn test_local_query() {
         let _ = rustls::crypto::CryptoProvider::install_default(
@@ -93,6 +95,8 @@ mod tests {
         };
     }
 
+    // skip on Windows as we do not provide a spice runtime for Windows
+    #[cfg(not(target_os = "windows"))]
     #[tokio::test]
     async fn test_local_query_with_params() {
         let _ = rustls::crypto::CryptoProvider::install_default(
