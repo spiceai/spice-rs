@@ -213,8 +213,8 @@ pub struct QueryErrorInfo {
 pub struct QuerySummary {
     /// The query ID.
     pub query_id: String,
-    /// Current state of the query.
-    pub state: String,
+    /// Current status of the query.
+    pub status: QueryStatus,
     /// When the query was created.
     pub created_at: String,
     /// Preview of the SQL query (may be truncated).
@@ -226,6 +226,8 @@ pub struct QuerySummary {
 pub struct QueryListResponse {
     /// List of queries.
     pub queries: Vec<QuerySummary>,
+    /// Total count of queries matching the filter.
+    pub total_count: Option<usize>,
 }
 
 /// Represents the current state of the `QueryResultStream` state machine.
@@ -382,6 +384,7 @@ impl QueryHttpClient {
             sql: sql.to_string(),
             parameters: None,
             timeout_seconds: None,
+            maximum_size: None,
         };
 
         let response = self
@@ -625,11 +628,12 @@ impl QueryHttpClient {
                         .into_iter()
                         .map(|q| QuerySummary {
                             query_id: q.query_id,
-                            state: q.state,
+                            status: q.status,
                             created_at: q.created_at,
                             sql_preview: q.sql_preview,
                         })
                         .collect(),
+                    total_count: list_response.total_count,
                 })
             }
             503 => Err(QueryError::ClusterModeRequired),
@@ -670,81 +674,105 @@ struct SubmitRequest {
     parameters: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     timeout_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    maximum_size: Option<u64>,
 }
 
+/// Maps to `SubmitQueryResponse` from the API.
 #[derive(Debug, Deserialize)]
-pub(crate) struct SubmitResponse {
+pub struct SubmitResponse {
     pub query_id: String,
     #[allow(dead_code)]
-    pub status: StatusResponse,
+    pub status: QueryStatus,
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub error: Option<ErrorResponse>,
     #[allow(dead_code)]
     pub status_url: String,
     #[allow(dead_code)]
     pub results_url: String,
 }
 
+/// Maps to `StatusResponse` from the API (`GET /v1/queries/{id}/status`).
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct StatusResponse {
-    pub state: String,
+pub struct StatusResponse {
+    pub status: QueryStatus,
     #[serde(default)]
     pub error: Option<ErrorResponse>,
 }
 
+/// Maps to `ErrorResponse` from the API.
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct ErrorResponse {
+pub struct ErrorResponse {
     #[serde(default)]
     pub error_code: String,
     pub message: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct QueryInfoResponse {
-    pub query_id: String,
-    pub status: StatusResponse,
     #[serde(default)]
-    pub result: Option<ResultMetadata>,
+    pub sql_state: Option<String>,
 }
 
+/// Maps to `QueryResponse` from the API (`GET /v1/queries/{id}`).
+#[derive(Debug, Deserialize)]
+pub struct QueryInfoResponse {
+    pub query_id: String,
+    pub status: QueryStatus,
+    #[serde(default)]
+    pub error: Option<ErrorResponse>,
+    #[serde(default)]
+    pub manifest: Option<ManifestMetadata>,
+    #[serde(default)]
+    pub result: Option<serde_json::Value>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub started_at: Option<String>,
+    #[serde(default)]
+    pub completed_at: Option<String>,
+    #[serde(default)]
+    pub expires_at: Option<String>,
+}
+
+/// Maps to `ManifestResponse` from the API.
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct ResultMetadata {
+pub struct ManifestMetadata {
+    #[serde(default)]
+    pub format: Option<String>,
+    #[serde(default)]
+    pub schema: Option<serde_json::Value>,
     pub total_row_count: u64,
     pub total_chunk_count: u64,
 }
 
+/// Maps to `ChunkResponse` from the API.
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
-pub(crate) struct ResultChunkResponse {
-    pub query_id: String,
+pub struct ResultChunkResponse {
     pub chunk_index: usize,
+    pub row_offset: usize,
     pub row_count: usize,
-    pub data: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub next_chunk_index: Option<usize>,
+    #[serde(default)]
+    pub next_chunk_url: Option<String>,
+    #[serde(default)]
+    pub data_array: Option<Vec<serde_json::Value>>,
 }
 
+/// Maps to `ListQueriesResponse` from the API.
 #[derive(Debug, Deserialize)]
-pub(crate) struct ListQueriesApiResponse {
+pub struct ListQueriesApiResponse {
     pub queries: Vec<QuerySummaryApiResponse>,
+    #[serde(default)]
+    pub total_count: Option<usize>,
 }
 
+/// Maps to `QuerySummary` from the API.
 #[derive(Debug, Deserialize)]
-pub(crate) struct QuerySummaryApiResponse {
+pub struct QuerySummaryApiResponse {
     pub query_id: String,
-    pub state: String,
+    pub status: QueryStatus,
     pub created_at: String,
     pub sql_preview: String,
-}
-
-impl StatusResponse {
-    pub fn to_status(&self) -> QueryStatus {
-        match self.state.to_uppercase().as_str() {
-            "RUNNING" => QueryStatus::Running,
-            "SUCCEEDED" => QueryStatus::Succeeded,
-            "FAILED" => QueryStatus::Failed,
-            "CANCELLED" => QueryStatus::Cancelled,
-            "CLOSED" => QueryStatus::Closed,
-            // Default to Pending for "PENDING" and unknown states
-            _ => QueryStatus::Pending,
-        }
-    }
 }
 
 /// A handle to an async query job.
@@ -813,7 +841,7 @@ impl QueryJob {
     /// Returns an error if the query is not found or the HTTP request fails.
     pub async fn status(&self) -> Result<QueryStatus, QueryError> {
         let response = self.client.get_status(&self.query_id).await?;
-        Ok(response.to_status())
+        Ok(response.status)
     }
 
     /// Gets detailed information about the query.
@@ -825,12 +853,12 @@ impl QueryJob {
         let response = self.client.get_query(&self.query_id).await?;
         Ok(QueryInfo {
             query_id: response.query_id,
-            status: response.status.to_status(),
-            error: response.status.error.map(|e| QueryErrorInfo {
+            status: response.status,
+            error: response.error.map(|e| QueryErrorInfo {
                 error_code: e.error_code,
                 message: e.message,
             }),
-            result: response.result.map(|r| QueryResult {
+            result: response.manifest.map(|r| QueryResult {
                 total_rows: r.total_row_count,
                 total_chunks: r.total_chunk_count,
             }),
@@ -976,12 +1004,12 @@ impl QueryJob {
         let response = self.client.cancel(&self.query_id).await?;
         Ok(QueryInfo {
             query_id: response.query_id,
-            status: response.status.to_status(),
-            error: response.status.error.map(|e| QueryErrorInfo {
+            status: response.status,
+            error: response.error.map(|e| QueryErrorInfo {
                 error_code: e.error_code,
                 message: e.message,
             }),
-            result: response.result.map(|r| QueryResult {
+            result: response.manifest.map(|r| QueryResult {
                 total_rows: r.total_row_count,
                 total_chunks: r.total_chunk_count,
             }),

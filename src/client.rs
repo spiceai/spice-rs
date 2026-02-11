@@ -256,7 +256,7 @@ impl SpiceClient {
     /// // List all queries
     /// let queries = client.queries(None, None).await?;
     /// for q in &queries.queries {
-    ///     println!("{}: {} - {}", q.query_id, q.state, q.sql_preview);
+    ///     println!("{}: {} - {}", q.query_id, q.status, q.sql_preview);
     /// }
     ///
     /// // List only running queries
