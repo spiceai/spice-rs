@@ -58,6 +58,8 @@ mod tests {
         )
     }
 
+    // skip on Windows as we do not provide a spice runtime for Windows
+    #[cfg(not(target_os = "windows"))]
     #[tokio::test]
     async fn test_local_query() {
         let _ = rustls::crypto::CryptoProvider::install_default(
@@ -65,7 +67,7 @@ mod tests {
         );
         let spice_client = new_local_client().await;
         match spice_client
-            .query("SELECT VendorID, tpep_pickup_datetime, fare_amount FROM taxi_trips WHERE VendorID == 1 and fare_amount > 1.0 ORDER BY fare_amount, tpep_pickup_datetime LIMIT 5;")
+            .sql("SELECT VendorID, tpep_pickup_datetime, fare_amount FROM taxi_trips WHERE VendorID == 1 and fare_amount > 1.0 ORDER BY fare_amount, tpep_pickup_datetime LIMIT 5;")
             .await
         {
             Ok(mut flight_data_stream) => {
@@ -93,6 +95,8 @@ mod tests {
         };
     }
 
+    // skip on Windows as we do not provide a spice runtime for Windows
+    #[cfg(not(target_os = "windows"))]
     #[tokio::test]
     async fn test_local_query_with_params() {
         let _ = rustls::crypto::CryptoProvider::install_default(
@@ -101,7 +105,7 @@ mod tests {
         let spice_client = new_local_client().await;
         let params = create_param_batch();
         match spice_client
-            .query_with_params(
+            .sql_with_params(
                 "SELECT VendorID, tpep_pickup_datetime, fare_amount FROM taxi_trips WHERE VendorID == $1 and fare_amount > $2 ORDER BY fare_amount, tpep_pickup_datetime LIMIT 5;",
                 Some(params),
             )
@@ -136,7 +140,7 @@ mod tests {
     async fn test_query() {
         let spice_client = new_cloud_client().await;
         match spice_client
-            .query("select c_custkey, c_name, c_nationkey from tpch.customer limit 10;")
+            .sql("select c_custkey, c_name, c_nationkey from tpch.customer limit 10;")
             .await
         {
             Ok(mut flight_data_stream) => {
@@ -167,7 +171,7 @@ mod tests {
     async fn test_query_streaming() {
         let spice_client = new_cloud_client().await;
         match spice_client
-            .query("select l_orderkey, l_partkey, l_quantity from tpch.lineitem limit 10000")
+            .sql("select l_orderkey, l_partkey, l_quantity from tpch.lineitem limit 10000")
             .await
         {
             Ok(mut flight_data_stream) => {
@@ -199,7 +203,7 @@ mod tests {
     async fn test_tpch_nation_types() {
         let spice_client = new_cloud_client().await;
         match spice_client
-            .query("SELECT n_nationkey, n_name, n_regionkey, n_comment FROM tpch.nation ORDER BY n_nationkey LIMIT 5")
+            .sql("SELECT n_nationkey, n_name, n_regionkey, n_comment FROM tpch.nation ORDER BY n_nationkey LIMIT 5")
             .await
         {
             Ok(mut flight_data_stream) => {
@@ -225,7 +229,7 @@ mod tests {
     async fn test_tpch_orders_decimal_types() {
         let spice_client = new_cloud_client().await;
         match spice_client
-            .query("SELECT o_orderkey, o_custkey, o_totalprice, o_orderstatus FROM tpch.orders ORDER BY o_orderkey LIMIT 10")
+            .sql("SELECT o_orderkey, o_custkey, o_totalprice, o_orderstatus FROM tpch.orders ORDER BY o_orderkey LIMIT 10")
             .await
         {
             Ok(mut flight_data_stream) => {
@@ -251,7 +255,7 @@ mod tests {
     async fn test_tpch_orders_date_types() {
         let spice_client = new_cloud_client().await;
         match spice_client
-            .query("SELECT o_orderkey, o_orderdate, o_orderpriority FROM tpch.orders ORDER BY o_orderdate LIMIT 10")
+            .sql("SELECT o_orderkey, o_orderdate, o_orderpriority FROM tpch.orders ORDER BY o_orderdate LIMIT 10")
             .await
         {
             Ok(mut flight_data_stream) => {
@@ -277,7 +281,7 @@ mod tests {
     async fn test_tpch_lineitem_decimal_types() {
         let spice_client = new_cloud_client().await;
         match spice_client
-            .query("SELECT l_orderkey, l_quantity, l_extendedprice, l_discount, l_tax FROM tpch.lineitem LIMIT 20")
+            .sql("SELECT l_orderkey, l_quantity, l_extendedprice, l_discount, l_tax FROM tpch.lineitem LIMIT 20")
             .await
         {
             Ok(mut flight_data_stream) => {
@@ -303,7 +307,7 @@ mod tests {
     async fn test_tpch_lineitem_date_types() {
         let spice_client = new_cloud_client().await;
         match spice_client
-            .query(
+            .sql(
                 "SELECT l_orderkey, l_shipdate, l_commitdate, l_receiptdate FROM tpch.lineitem LIMIT 15",
             )
             .await
@@ -331,7 +335,7 @@ mod tests {
     async fn test_tpch_aggregation() {
         let spice_client = new_cloud_client().await;
         match spice_client
-            .query("SELECT n_regionkey, COUNT(*) as nation_count FROM tpch.nation GROUP BY n_regionkey ORDER BY n_regionkey")
+            .sql("SELECT n_regionkey, COUNT(*) as nation_count FROM tpch.nation GROUP BY n_regionkey ORDER BY n_regionkey")
             .await
         {
             Ok(mut flight_data_stream) => {
@@ -357,7 +361,7 @@ mod tests {
     async fn test_tpch_sum_aggregation() {
         let spice_client = new_cloud_client().await;
         match spice_client
-            .query("SELECT o_orderstatus, COUNT(*) as order_count, SUM(o_totalprice) as total_value FROM tpch.orders GROUP BY o_orderstatus ORDER BY o_orderstatus")
+            .sql("SELECT o_orderstatus, COUNT(*) as order_count, SUM(o_totalprice) as total_value FROM tpch.orders GROUP BY o_orderstatus ORDER BY o_orderstatus")
             .await
         {
             Ok(mut flight_data_stream) => {
@@ -383,7 +387,7 @@ mod tests {
     async fn test_tpch_join_query() {
         let spice_client = new_cloud_client().await;
         match spice_client
-            .query("SELECT n.n_name, r.r_name FROM tpch.nation n JOIN tpch.region r ON n.n_regionkey = r.r_regionkey ORDER BY n.n_name LIMIT 10")
+            .sql("SELECT n.n_name, r.r_name FROM tpch.nation n JOIN tpch.region r ON n.n_regionkey = r.r_regionkey ORDER BY n.n_name LIMIT 10")
             .await
         {
             Ok(mut flight_data_stream) => {
@@ -408,7 +412,7 @@ mod tests {
     async fn test_tpch_region_table() {
         let spice_client = new_cloud_client().await;
         match spice_client
-            .query("SELECT r_regionkey, r_name, r_comment FROM tpch.region ORDER BY r_regionkey")
+            .sql("SELECT r_regionkey, r_name, r_comment FROM tpch.region ORDER BY r_regionkey")
             .await
         {
             Ok(mut flight_data_stream) => {
@@ -434,7 +438,7 @@ mod tests {
     async fn test_tpch_supplier_types() {
         let spice_client = new_cloud_client().await;
         match spice_client
-            .query("SELECT s_suppkey, s_name, s_acctbal, s_nationkey FROM tpch.supplier ORDER BY s_suppkey LIMIT 10")
+            .sql("SELECT s_suppkey, s_name, s_acctbal, s_nationkey FROM tpch.supplier ORDER BY s_suppkey LIMIT 10")
             .await
         {
             Ok(mut flight_data_stream) => {
@@ -460,7 +464,7 @@ mod tests {
     async fn test_tpch_part_types() {
         let spice_client = new_cloud_client().await;
         match spice_client
-            .query("SELECT p_partkey, p_name, p_brand, p_size, p_retailprice FROM tpch.part ORDER BY p_partkey LIMIT 10")
+            .sql("SELECT p_partkey, p_name, p_brand, p_size, p_retailprice FROM tpch.part ORDER BY p_partkey LIMIT 10")
             .await
         {
             Ok(mut flight_data_stream) => {
@@ -486,7 +490,7 @@ mod tests {
     async fn test_tpch_partsupp_types() {
         let spice_client = new_cloud_client().await;
         match spice_client
-            .query(
+            .sql(
                 "SELECT ps_partkey, ps_suppkey, ps_availqty, ps_supplycost FROM tpch.partsupp LIMIT 10",
             )
             .await
@@ -514,7 +518,7 @@ mod tests {
     async fn test_tpch_calculated_columns() {
         let spice_client = new_cloud_client().await;
         match spice_client
-            .query("SELECT l_orderkey, l_quantity, l_extendedprice, l_discount, l_extendedprice * (1 - l_discount) as net_price FROM tpch.lineitem LIMIT 10")
+            .sql("SELECT l_orderkey, l_quantity, l_extendedprice, l_discount, l_extendedprice * (1 - l_discount) as net_price FROM tpch.lineitem LIMIT 10")
             .await
         {
             Ok(mut flight_data_stream) => {
@@ -539,7 +543,7 @@ mod tests {
     async fn test_tpch_filtered_query() {
         let spice_client = new_cloud_client().await;
         match spice_client
-            .query("SELECT c_custkey, c_name, c_acctbal FROM tpch.customer WHERE c_acctbal > 0 ORDER BY c_acctbal DESC LIMIT 10")
+            .sql("SELECT c_custkey, c_name, c_acctbal FROM tpch.customer WHERE c_acctbal > 0 ORDER BY c_acctbal DESC LIMIT 10")
             .await
         {
             Ok(mut flight_data_stream) => {

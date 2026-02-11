@@ -18,7 +18,7 @@ cargo add spiceai
 
 Follow the [quickstart guide](https://github.com/spiceai/spiceai?tab=readme-ov-file#%EF%B8%8F-quickstart-local-machine) to install and run spice locally
 
-```rust
+```rust,no_run
 use spiceai::ClientBuilder;
 
 #[tokio::main]
