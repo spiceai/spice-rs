@@ -35,11 +35,9 @@
 
 use arrow::array::RecordBatch;
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
-use arrow::ipc::reader::StreamReader;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use snafu::Snafu;
-use std::io::Cursor;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -107,7 +105,7 @@ pub enum QueryError {
     #[snafu(display("Timeout waiting for query {query_id} to complete"))]
     Timeout { query_id: String },
 
-    /// Failed to deserialize Arrow IPC data.
+    /// Failed to deserialize Arrow data from server response.
     #[snafu(display("Failed to deserialize Arrow data: {message}"))]
     ArrowError { message: String },
 }
@@ -282,16 +280,23 @@ pub struct QueryResultStream {
     client: Arc<QueryHttpClient>,
     query_id: String,
     total_chunks: u64,
+    schema: SchemaRef,
     state: ResultStreamState,
 }
 
 impl QueryResultStream {
-    fn new(client: Arc<QueryHttpClient>, query_id: String, total_chunks: u64) -> Self {
+    fn new(
+        client: Arc<QueryHttpClient>,
+        query_id: String,
+        total_chunks: u64,
+        schema: SchemaRef,
+    ) -> Self {
         // Start by yielding from an empty iterator, which will trigger fetching chunk 0
         Self {
             client,
             query_id,
             total_chunks,
+            schema,
             state: ResultStreamState::YieldingBatches {
                 batches: Vec::new().into_iter(),
                 next_chunk: 0,
@@ -309,11 +314,12 @@ impl QueryResultStream {
         query_id: String,
         schema: SchemaRef,
     ) -> Self {
-        let empty_batch = RecordBatch::new_empty(schema);
+        let empty_batch = RecordBatch::new_empty(Arc::clone(&schema));
         Self {
             client,
             query_id,
             total_chunks: 0,
+            schema,
             state: ResultStreamState::YieldingBatches {
                 batches: vec![empty_batch].into_iter(),
                 next_chunk: 0,
@@ -360,10 +366,11 @@ impl Stream for QueryResultStream {
                     }
                     let client = Arc::clone(&self.client);
                     let query_id = self.query_id.clone();
+                    let schema = Arc::clone(&self.schema);
                     #[allow(clippy::cast_possible_truncation)]
                     let fut = Box::pin(async move {
                         client
-                            .get_results_arrow(&query_id, chunk_to_fetch as usize)
+                            .get_results_arrow(&query_id, chunk_to_fetch as usize, &schema)
                             .await
                     });
                     self.state = ResultStreamState::FetchingChunk {
@@ -539,9 +546,10 @@ impl QueryHttpClient {
         &self,
         query_id: &str,
         chunk_index: usize,
+        schema: &SchemaRef,
     ) -> Result<Vec<RecordBatch>, QueryError> {
         let url = format!(
-            "{}/v1/queries/{}/results/chunks/{}?format=arrow",
+            "{}/v1/queries/{}/results/chunks/{}",
             self.base_url, query_id, chunk_index
         );
 
@@ -555,10 +563,11 @@ impl QueryHttpClient {
 
         match response.status().as_u16() {
             200 => {
-                let bytes = response.bytes().await.map_err(|e| QueryError::HttpError {
-                    message: e.to_string(),
-                })?;
-                parse_arrow_ipc(&bytes)
+                let chunk: ResultChunkResponse =
+                    response.json().await.map_err(|e| QueryError::ParseError {
+                        message: e.to_string(),
+                    })?;
+                json_data_array_to_batches(chunk.data_array.as_deref(), schema)
             }
             404 => Err(QueryError::NotFound {
                 query_id: query_id.to_string(),
@@ -671,12 +680,32 @@ impl QueryHttpClient {
     }
 }
 
-/// Parse Arrow IPC stream data into record batches.
-fn parse_arrow_ipc(data: &[u8]) -> Result<Vec<RecordBatch>, QueryError> {
-    let cursor = Cursor::new(data);
-    let reader = StreamReader::try_new(cursor, None).map_err(|e| QueryError::ArrowError {
-        message: e.to_string(),
-    })?;
+/// Convert the `data_array` JSON values from a chunk response into `RecordBatch`es.
+///
+/// The server returns each row as a JSON object. We serialize them into
+/// newline-delimited JSON and use `arrow_json::ReaderBuilder` (with the
+/// known schema) to reconstruct typed Arrow arrays.
+fn json_data_array_to_batches(
+    data_array: Option<&[serde_json::Value]>,
+    schema: &SchemaRef,
+) -> Result<Vec<RecordBatch>, QueryError> {
+    let rows = match data_array {
+        Some(rows) if !rows.is_empty() => rows,
+        _ => return Ok(vec![RecordBatch::new_empty(Arc::clone(schema))]),
+    };
+
+    // Build newline-delimited JSON from all row values.
+    let ndjson: String = rows
+        .iter()
+        .map(serde_json::Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let reader = arrow_json::ReaderBuilder::new(Arc::clone(schema))
+        .build(std::io::Cursor::new(ndjson.as_bytes()))
+        .map_err(|e| QueryError::ArrowError {
+            message: e.to_string(),
+        })?;
 
     let mut batches = Vec::new();
     for batch_result in reader {
@@ -1171,9 +1200,10 @@ impl QueryJob {
         // When the query returned zero rows the chunk retrieval API will
         // return a 404. Instead, build an empty RecordBatch that carries
         // the correct result schema so callers can still inspect columns.
+        let schema =
+            manifest_schema.map_or_else(|| Arc::new(Schema::empty()), schema_from_manifest);
+
         if total_rows == 0 {
-            let schema =
-                manifest_schema.map_or_else(|| Arc::new(Schema::empty()), schema_from_manifest);
             return Ok(QueryResultStream::empty_with_schema(
                 Arc::clone(&self.client),
                 self.query_id.clone(),
@@ -1185,6 +1215,7 @@ impl QueryJob {
             Arc::clone(&self.client),
             self.query_id.clone(),
             total_chunks,
+            schema,
         ))
     }
 
