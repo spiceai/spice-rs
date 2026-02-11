@@ -198,7 +198,7 @@ impl SpiceClient {
     /// ```no_run
     /// # use spiceai::ClientBuilder;
     /// # #[tokio::main]
-    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     /// let client = ClientBuilder::new()
     ///     .http_url("http://localhost:8090")
     ///     .build()
@@ -247,7 +247,7 @@ impl SpiceClient {
     /// ```no_run
     /// # use spiceai::ClientBuilder;
     /// # #[tokio::main]
-    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     /// let client = ClientBuilder::new()
     ///     .http_url("http://localhost:8090")
     ///     .build()
@@ -294,7 +294,7 @@ impl SpiceClient {
     /// ```no_run
     /// # use spiceai::ClientBuilder;
     /// # #[tokio::main]
-    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     /// let client = ClientBuilder::new()
     ///     .http_url("http://localhost:8090")
     ///     .build()
@@ -340,7 +340,7 @@ impl SpiceClient {
     /// ```no_run
     /// # use spiceai::ClientBuilder;
     /// # #[tokio::main]
-    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     /// let client = ClientBuilder::new()
     ///     .http_url("http://localhost:8090")
     ///     .build()
@@ -375,7 +375,7 @@ impl SpiceClient {
 ///
 /// By default the `SpiceClient` will use local spice runtime flight endpoint.
 /// Follow [spiceai quickstart](https://github.com/spiceai/spiceai?tab=readme-ov-file#%EF%B8%8F-quickstart-local-machine) to setup local spice runtime.
-/// ```
+/// ```no_run
 /// # use spiceai::ClientBuilder;
 ///
 /// # #[tokio::main]

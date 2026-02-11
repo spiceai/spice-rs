@@ -9,7 +9,7 @@
 //! use spiceai::{Client, ClientBuilder};
 //!
 //! #[tokio::main]
-//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 //!     let client = ClientBuilder::new()
 //!         .http_url("http://localhost:8090")
 //!         .build()
@@ -259,7 +259,7 @@ enum ResultStreamState {
 /// use spiceai::ClientBuilder;
 ///
 /// # #[tokio::main]
-/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 /// let client = ClientBuilder::new()
 ///     .http_url("http://localhost:8090")
 ///     .build()
@@ -785,7 +785,7 @@ pub struct QuerySummaryApiResponse {
 /// ```no_run
 /// # use spiceai::{Client, ClientBuilder};
 /// # #[tokio::main]
-/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 /// let client = ClientBuilder::new()
 ///     .http_url("http://localhost:8090")
 ///     .build()
@@ -955,7 +955,7 @@ impl QueryJob {
     /// use spiceai::ClientBuilder;
     ///
     /// # #[tokio::main]
-    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     /// let client = ClientBuilder::new()
     ///     .http_url("http://localhost:8090")
     ///     .build()
