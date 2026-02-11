@@ -34,6 +34,7 @@
 //! ```
 
 use arrow::array::RecordBatch;
+use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::ipc::reader::StreamReader;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
@@ -293,6 +294,28 @@ impl QueryResultStream {
             total_chunks,
             state: ResultStreamState::YieldingBatches {
                 batches: Vec::new().into_iter(),
+                next_chunk: 0,
+            },
+        }
+    }
+
+    /// Creates a stream that yields a single empty batch and then completes.
+    ///
+    /// Used when the query returned 0 rows: the chunk API will 404, so we
+    /// construct an empty `RecordBatch` with the correct schema from the
+    /// manifest and return it immediately.
+    fn empty_with_schema(
+        client: Arc<QueryHttpClient>,
+        query_id: String,
+        schema: SchemaRef,
+    ) -> Self {
+        let empty_batch = RecordBatch::new_empty(schema);
+        Self {
+            client,
+            query_id,
+            total_chunks: 0,
+            state: ResultStreamState::YieldingBatches {
+                batches: vec![empty_batch].into_iter(),
                 next_chunk: 0,
             },
         }
@@ -665,6 +688,134 @@ fn parse_arrow_ipc(data: &[u8]) -> Result<Vec<RecordBatch>, QueryError> {
     Ok(batches)
 }
 
+/// Parse a type name string (from the manifest) into an Arrow `DataType`.
+///
+/// The server serializes types via `DataType::to_string()`, so we match
+/// on the resulting strings. Unknown types fall back to `Utf8`.
+fn parse_type_name(type_name: &str) -> DataType {
+    match type_name {
+        "Null" => DataType::Null,
+        "Boolean" => DataType::Boolean,
+        "Int8" => DataType::Int8,
+        "Int16" => DataType::Int16,
+        "Int32" => DataType::Int32,
+        "Int64" => DataType::Int64,
+        "UInt8" => DataType::UInt8,
+        "UInt16" => DataType::UInt16,
+        "UInt32" => DataType::UInt32,
+        "UInt64" => DataType::UInt64,
+        "Float16" => DataType::Float16,
+        "Float32" => DataType::Float32,
+        "Float64" => DataType::Float64,
+        "Utf8" => DataType::Utf8,
+        "LargeUtf8" => DataType::LargeUtf8,
+        "Utf8View" => DataType::Utf8View,
+        "Binary" => DataType::Binary,
+        "LargeBinary" => DataType::LargeBinary,
+        "BinaryView" => DataType::BinaryView,
+        "Date32" => DataType::Date32,
+        "Date64" => DataType::Date64,
+        s if s.starts_with("Decimal128") => parse_decimal128(s).unwrap_or(DataType::Utf8),
+        s if s.starts_with("Decimal256") => parse_decimal256(s).unwrap_or(DataType::Utf8),
+        s if s.starts_with("Timestamp") => parse_timestamp(s).unwrap_or(DataType::Utf8),
+        s if s.starts_with("Duration") => parse_duration(s).unwrap_or(DataType::Utf8),
+        s if s.starts_with("Time32") => parse_time32(s).unwrap_or(DataType::Utf8),
+        s if s.starts_with("Time64") => parse_time64(s).unwrap_or(DataType::Utf8),
+        s if s.starts_with("Interval") => parse_interval(s).unwrap_or(DataType::Utf8),
+        s if s.starts_with("FixedSizeBinary") => {
+            parse_fixed_size_binary(s).unwrap_or(DataType::Utf8)
+        }
+        _ => {
+            tracing::warn!("Unrecognized Arrow type name '{type_name}', defaulting to Utf8");
+            DataType::Utf8
+        }
+    }
+}
+
+/// Parse `Decimal128(precision, scale)` from a type name string.
+fn parse_decimal128(s: &str) -> Option<DataType> {
+    let inner = s.strip_prefix("Decimal128(")?.strip_suffix(')')?;
+    let (p, sc) = inner.split_once(", ")?;
+    Some(DataType::Decimal128(p.parse().ok()?, sc.parse().ok()?))
+}
+
+/// Parse `Decimal256(precision, scale)` from a type name string.
+fn parse_decimal256(s: &str) -> Option<DataType> {
+    let inner = s.strip_prefix("Decimal256(")?.strip_suffix(')')?;
+    let (p, sc) = inner.split_once(", ")?;
+    Some(DataType::Decimal256(p.parse().ok()?, sc.parse().ok()?))
+}
+
+/// Parse a `TimeUnit` from its Display string.
+fn parse_time_unit(s: &str) -> Option<arrow::datatypes::TimeUnit> {
+    match s {
+        "Second" => Some(arrow::datatypes::TimeUnit::Second),
+        "Millisecond" => Some(arrow::datatypes::TimeUnit::Millisecond),
+        "Microsecond" => Some(arrow::datatypes::TimeUnit::Microsecond),
+        "Nanosecond" => Some(arrow::datatypes::TimeUnit::Nanosecond),
+        _ => None,
+    }
+}
+
+/// Parse `Timestamp(unit, tz)` from a type name string.
+fn parse_timestamp(s: &str) -> Option<DataType> {
+    let inner = s.strip_prefix("Timestamp(")?.strip_suffix(')')?;
+    let (unit_str, tz_str) = inner.split_once(", ")?;
+    let unit = parse_time_unit(unit_str)?;
+    let tz = if tz_str == "None" {
+        None
+    } else {
+        Some(tz_str.trim_matches('"').into())
+    };
+    Some(DataType::Timestamp(unit, tz))
+}
+
+/// Parse `Duration(unit)` from a type name string.
+fn parse_duration(s: &str) -> Option<DataType> {
+    let inner = s.strip_prefix("Duration(")?.strip_suffix(')')?;
+    Some(DataType::Duration(parse_time_unit(inner)?))
+}
+
+/// Parse `Time32(unit)` from a type name string.
+fn parse_time32(s: &str) -> Option<DataType> {
+    let inner = s.strip_prefix("Time32(")?.strip_suffix(')')?;
+    Some(DataType::Time32(parse_time_unit(inner)?))
+}
+
+/// Parse `Time64(unit)` from a type name string.
+fn parse_time64(s: &str) -> Option<DataType> {
+    let inner = s.strip_prefix("Time64(")?.strip_suffix(')')?;
+    Some(DataType::Time64(parse_time_unit(inner)?))
+}
+
+/// Parse `Interval(unit)` from a type name string.
+fn parse_interval(s: &str) -> Option<DataType> {
+    let inner = s.strip_prefix("Interval(")?.strip_suffix(')')?;
+    let unit = match inner {
+        "YearMonth" => arrow::datatypes::IntervalUnit::YearMonth,
+        "DayTime" => arrow::datatypes::IntervalUnit::DayTime,
+        "MonthDayNano" => arrow::datatypes::IntervalUnit::MonthDayNano,
+        _ => return None,
+    };
+    Some(DataType::Interval(unit))
+}
+
+/// Parse `FixedSizeBinary(n)` from a type name string.
+fn parse_fixed_size_binary(s: &str) -> Option<DataType> {
+    let inner = s.strip_prefix("FixedSizeBinary(")?.strip_suffix(')')?;
+    Some(DataType::FixedSizeBinary(inner.parse().ok()?))
+}
+
+/// Build an Arrow [`Schema`] from a [`ManifestSchema`].
+fn schema_from_manifest(manifest_schema: &ManifestSchema) -> SchemaRef {
+    let fields: Vec<Field> = manifest_schema
+        .columns
+        .iter()
+        .map(|col| Field::new(&col.name, parse_type_name(&col.type_name), col.nullable))
+        .collect();
+    Arc::new(Schema::new(fields))
+}
+
 // API request/response types
 
 #[derive(Debug, Serialize)]
@@ -738,9 +889,31 @@ pub struct ManifestMetadata {
     #[serde(default)]
     pub format: Option<String>,
     #[serde(default)]
-    pub schema: Option<serde_json::Value>,
+    pub schema: Option<ManifestSchema>,
     pub total_row_count: u64,
     pub total_chunk_count: u64,
+}
+
+/// Schema information from the manifest response.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ManifestSchema {
+    /// Number of columns.
+    pub column_count: usize,
+    /// Column definitions.
+    pub columns: Vec<ManifestSchemaColumn>,
+}
+
+/// Schema information for a single column from the manifest response.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ManifestSchemaColumn {
+    /// Column name.
+    pub name: String,
+    /// Arrow data type name (e.g. "Int32", "Utf8", "Boolean").
+    pub type_name: String,
+    /// Whether the column can contain nulls.
+    pub nullable: bool,
+    /// Column position (0-indexed).
+    pub position: usize,
 }
 
 /// Maps to `ChunkResponse` from the API.
@@ -978,15 +1151,35 @@ impl QueryJob {
     ///
     /// Returns an error if the query is not complete, not found, or results have expired.
     pub async fn results_stream(&self) -> Result<QueryResultStream, QueryError> {
-        let info = self.info().await?;
+        let response = self.client.get_query(&self.query_id).await?;
 
-        if !info.status.is_success() {
+        if !response.status.is_success() {
             return Err(QueryError::NotReady {
                 query_id: self.query_id.clone(),
             });
         }
 
-        let total_chunks = info.result.map_or(1, |r| r.total_chunks);
+        let (total_rows, total_chunks, manifest_schema) = match &response.manifest {
+            Some(manifest) => (
+                manifest.total_row_count,
+                manifest.total_chunk_count,
+                manifest.schema.as_ref(),
+            ),
+            None => (0, 1, None),
+        };
+
+        // When the query returned zero rows the chunk retrieval API will
+        // return a 404. Instead, build an empty RecordBatch that carries
+        // the correct result schema so callers can still inspect columns.
+        if total_rows == 0 {
+            let schema =
+                manifest_schema.map_or_else(|| Arc::new(Schema::empty()), schema_from_manifest);
+            return Ok(QueryResultStream::empty_with_schema(
+                Arc::clone(&self.client),
+                self.query_id.clone(),
+                schema,
+            ));
+        }
 
         Ok(QueryResultStream::new(
             Arc::clone(&self.client),
@@ -1023,5 +1216,813 @@ impl std::fmt::Debug for QueryJob {
             .field("query_id", &self.query_id)
             .field("poll_interval", &self.poll_interval)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::datatypes::{IntervalUnit, TimeUnit};
+    use futures::StreamExt;
+
+    // -----------------------------------------------------------------------
+    // Helper: build a ManifestSchemaColumn
+    // -----------------------------------------------------------------------
+    fn col(name: &str, type_name: &str, nullable: bool, position: usize) -> ManifestSchemaColumn {
+        ManifestSchemaColumn {
+            name: name.to_string(),
+            type_name: type_name.to_string(),
+            nullable,
+            position,
+        }
+    }
+
+    fn manifest(columns: Vec<ManifestSchemaColumn>) -> ManifestSchema {
+        ManifestSchema {
+            column_count: columns.len(),
+            columns,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_type_name – primitive scalar types
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_parse_type_name_null() {
+        assert_eq!(parse_type_name("Null"), DataType::Null);
+    }
+
+    #[test]
+    fn test_parse_type_name_boolean() {
+        assert_eq!(parse_type_name("Boolean"), DataType::Boolean);
+    }
+
+    #[test]
+    fn test_parse_type_name_integer_types() {
+        assert_eq!(parse_type_name("Int8"), DataType::Int8);
+        assert_eq!(parse_type_name("Int16"), DataType::Int16);
+        assert_eq!(parse_type_name("Int32"), DataType::Int32);
+        assert_eq!(parse_type_name("Int64"), DataType::Int64);
+    }
+
+    #[test]
+    fn test_parse_type_name_unsigned_integer_types() {
+        assert_eq!(parse_type_name("UInt8"), DataType::UInt8);
+        assert_eq!(parse_type_name("UInt16"), DataType::UInt16);
+        assert_eq!(parse_type_name("UInt32"), DataType::UInt32);
+        assert_eq!(parse_type_name("UInt64"), DataType::UInt64);
+    }
+
+    #[test]
+    fn test_parse_type_name_float_types() {
+        assert_eq!(parse_type_name("Float16"), DataType::Float16);
+        assert_eq!(parse_type_name("Float32"), DataType::Float32);
+        assert_eq!(parse_type_name("Float64"), DataType::Float64);
+    }
+
+    #[test]
+    fn test_parse_type_name_string_types() {
+        assert_eq!(parse_type_name("Utf8"), DataType::Utf8);
+        assert_eq!(parse_type_name("LargeUtf8"), DataType::LargeUtf8);
+        assert_eq!(parse_type_name("Utf8View"), DataType::Utf8View);
+    }
+
+    #[test]
+    fn test_parse_type_name_binary_types() {
+        assert_eq!(parse_type_name("Binary"), DataType::Binary);
+        assert_eq!(parse_type_name("LargeBinary"), DataType::LargeBinary);
+        assert_eq!(parse_type_name("BinaryView"), DataType::BinaryView);
+    }
+
+    #[test]
+    fn test_parse_type_name_date_types() {
+        assert_eq!(parse_type_name("Date32"), DataType::Date32);
+        assert_eq!(parse_type_name("Date64"), DataType::Date64);
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_type_name – parameterised types
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_parse_type_name_decimal128() {
+        assert_eq!(
+            parse_type_name("Decimal128(10, 2)"),
+            DataType::Decimal128(10, 2)
+        );
+    }
+
+    #[test]
+    fn test_parse_type_name_decimal128_large_precision() {
+        assert_eq!(
+            parse_type_name("Decimal128(38, 18)"),
+            DataType::Decimal128(38, 18)
+        );
+    }
+
+    #[test]
+    fn test_parse_type_name_decimal128_zero_scale() {
+        assert_eq!(
+            parse_type_name("Decimal128(10, 0)"),
+            DataType::Decimal128(10, 0)
+        );
+    }
+
+    #[test]
+    fn test_parse_type_name_decimal256() {
+        assert_eq!(
+            parse_type_name("Decimal256(20, 5)"),
+            DataType::Decimal256(20, 5)
+        );
+    }
+
+    #[test]
+    fn test_parse_type_name_timestamp_nanosecond_no_tz() {
+        assert_eq!(
+            parse_type_name("Timestamp(Nanosecond, None)"),
+            DataType::Timestamp(TimeUnit::Nanosecond, None)
+        );
+    }
+
+    #[test]
+    fn test_parse_type_name_timestamp_millisecond_no_tz() {
+        assert_eq!(
+            parse_type_name("Timestamp(Millisecond, None)"),
+            DataType::Timestamp(TimeUnit::Millisecond, None)
+        );
+    }
+
+    #[test]
+    fn test_parse_type_name_timestamp_microsecond_no_tz() {
+        assert_eq!(
+            parse_type_name("Timestamp(Microsecond, None)"),
+            DataType::Timestamp(TimeUnit::Microsecond, None)
+        );
+    }
+
+    #[test]
+    fn test_parse_type_name_timestamp_second_no_tz() {
+        assert_eq!(
+            parse_type_name("Timestamp(Second, None)"),
+            DataType::Timestamp(TimeUnit::Second, None)
+        );
+    }
+
+    #[test]
+    fn test_parse_type_name_timestamp_with_timezone() {
+        assert_eq!(
+            parse_type_name("Timestamp(Nanosecond, \"UTC\")"),
+            DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()))
+        );
+    }
+
+    #[test]
+    fn test_parse_type_name_timestamp_with_offset_timezone() {
+        assert_eq!(
+            parse_type_name("Timestamp(Microsecond, \"+05:30\")"),
+            DataType::Timestamp(TimeUnit::Microsecond, Some("+05:30".into()))
+        );
+    }
+
+    #[test]
+    fn test_parse_type_name_duration_all_units() {
+        assert_eq!(
+            parse_type_name("Duration(Second)"),
+            DataType::Duration(TimeUnit::Second)
+        );
+        assert_eq!(
+            parse_type_name("Duration(Millisecond)"),
+            DataType::Duration(TimeUnit::Millisecond)
+        );
+        assert_eq!(
+            parse_type_name("Duration(Microsecond)"),
+            DataType::Duration(TimeUnit::Microsecond)
+        );
+        assert_eq!(
+            parse_type_name("Duration(Nanosecond)"),
+            DataType::Duration(TimeUnit::Nanosecond)
+        );
+    }
+
+    #[test]
+    fn test_parse_type_name_time32() {
+        assert_eq!(
+            parse_type_name("Time32(Second)"),
+            DataType::Time32(TimeUnit::Second)
+        );
+        assert_eq!(
+            parse_type_name("Time32(Millisecond)"),
+            DataType::Time32(TimeUnit::Millisecond)
+        );
+    }
+
+    #[test]
+    fn test_parse_type_name_time64() {
+        assert_eq!(
+            parse_type_name("Time64(Microsecond)"),
+            DataType::Time64(TimeUnit::Microsecond)
+        );
+        assert_eq!(
+            parse_type_name("Time64(Nanosecond)"),
+            DataType::Time64(TimeUnit::Nanosecond)
+        );
+    }
+
+    #[test]
+    fn test_parse_type_name_interval_all_units() {
+        assert_eq!(
+            parse_type_name("Interval(YearMonth)"),
+            DataType::Interval(IntervalUnit::YearMonth)
+        );
+        assert_eq!(
+            parse_type_name("Interval(DayTime)"),
+            DataType::Interval(IntervalUnit::DayTime)
+        );
+        assert_eq!(
+            parse_type_name("Interval(MonthDayNano)"),
+            DataType::Interval(IntervalUnit::MonthDayNano)
+        );
+    }
+
+    #[test]
+    fn test_parse_type_name_fixed_size_binary() {
+        assert_eq!(
+            parse_type_name("FixedSizeBinary(16)"),
+            DataType::FixedSizeBinary(16)
+        );
+    }
+
+    #[test]
+    fn test_parse_type_name_fixed_size_binary_large() {
+        assert_eq!(
+            parse_type_name("FixedSizeBinary(256)"),
+            DataType::FixedSizeBinary(256)
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_type_name – unknown / malformed input
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_parse_type_name_unknown_falls_back_to_utf8() {
+        assert_eq!(parse_type_name("UnknownType"), DataType::Utf8);
+    }
+
+    #[test]
+    fn test_parse_type_name_empty_string_falls_back_to_utf8() {
+        assert_eq!(parse_type_name(""), DataType::Utf8);
+    }
+
+    #[test]
+    fn test_parse_type_name_malformed_decimal_falls_back_to_utf8() {
+        // Missing closing paren
+        assert_eq!(parse_type_name("Decimal128(10, 2"), DataType::Utf8);
+    }
+
+    #[test]
+    fn test_parse_type_name_malformed_decimal_no_scale() {
+        assert_eq!(parse_type_name("Decimal128(10)"), DataType::Utf8);
+    }
+
+    #[test]
+    fn test_parse_type_name_malformed_timestamp_bad_unit() {
+        assert_eq!(
+            parse_type_name("Timestamp(Picosecond, None)"),
+            DataType::Utf8
+        );
+    }
+
+    #[test]
+    fn test_parse_type_name_malformed_timestamp_empty() {
+        assert_eq!(parse_type_name("Timestamp()"), DataType::Utf8);
+    }
+
+    #[test]
+    fn test_parse_type_name_malformed_duration_bad_unit() {
+        assert_eq!(parse_type_name("Duration(Picosecond)"), DataType::Utf8);
+    }
+
+    #[test]
+    fn test_parse_type_name_malformed_interval_bad_unit() {
+        assert_eq!(parse_type_name("Interval(Weekly)"), DataType::Utf8);
+    }
+
+    #[test]
+    fn test_parse_type_name_malformed_fixed_size_binary_no_size() {
+        assert_eq!(parse_type_name("FixedSizeBinary()"), DataType::Utf8);
+    }
+
+    #[test]
+    fn test_parse_type_name_malformed_fixed_size_binary_non_numeric() {
+        assert_eq!(parse_type_name("FixedSizeBinary(abc)"), DataType::Utf8);
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_type_name – roundtrip via DataType::to_string()
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_parse_type_name_roundtrip_scalars() {
+        let types = vec![
+            DataType::Null,
+            DataType::Boolean,
+            DataType::Int8,
+            DataType::Int16,
+            DataType::Int32,
+            DataType::Int64,
+            DataType::UInt8,
+            DataType::UInt16,
+            DataType::UInt32,
+            DataType::UInt64,
+            DataType::Float16,
+            DataType::Float32,
+            DataType::Float64,
+            DataType::Utf8,
+            DataType::LargeUtf8,
+            DataType::Binary,
+            DataType::LargeBinary,
+            DataType::Date32,
+            DataType::Date64,
+        ];
+        for dt in types {
+            assert_eq!(
+                parse_type_name(&dt.to_string()),
+                dt,
+                "roundtrip failed for {dt}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_type_name_roundtrip_decimal128() {
+        let dt = DataType::Decimal128(38, 10);
+        assert_eq!(parse_type_name(&dt.to_string()), dt);
+    }
+
+    #[test]
+    fn test_parse_type_name_roundtrip_decimal256() {
+        let dt = DataType::Decimal256(76, 20);
+        assert_eq!(parse_type_name(&dt.to_string()), dt);
+    }
+
+    #[test]
+    fn test_parse_type_name_roundtrip_timestamp_no_tz() {
+        // The server sends type names matching the format "Timestamp(Nanosecond, None)".
+        // This is distinct from both Display (abbreviated units) and Debug (Some(...) wrapping).
+        let expected = DataType::Timestamp(TimeUnit::Nanosecond, None);
+        assert_eq!(parse_type_name("Timestamp(Nanosecond, None)"), expected);
+    }
+
+    #[test]
+    fn test_parse_type_name_roundtrip_timestamp_with_tz() {
+        let expected = DataType::Timestamp(TimeUnit::Microsecond, Some("America/New_York".into()));
+        assert_eq!(
+            parse_type_name("Timestamp(Microsecond, \"America/New_York\")"),
+            expected
+        );
+    }
+
+    #[test]
+    fn test_parse_type_name_roundtrip_duration() {
+        let expected = DataType::Duration(TimeUnit::Millisecond);
+        assert_eq!(parse_type_name("Duration(Millisecond)"), expected);
+    }
+
+    #[test]
+    fn test_parse_type_name_roundtrip_time32() {
+        let expected = DataType::Time32(TimeUnit::Millisecond);
+        assert_eq!(parse_type_name("Time32(Millisecond)"), expected);
+    }
+
+    #[test]
+    fn test_parse_type_name_roundtrip_time64() {
+        let expected = DataType::Time64(TimeUnit::Nanosecond);
+        assert_eq!(parse_type_name("Time64(Nanosecond)"), expected);
+    }
+
+    #[test]
+    fn test_parse_type_name_roundtrip_interval() {
+        let dt = DataType::Interval(IntervalUnit::MonthDayNano);
+        assert_eq!(parse_type_name(&dt.to_string()), dt);
+    }
+
+    #[test]
+    fn test_parse_type_name_roundtrip_fixed_size_binary() {
+        let dt = DataType::FixedSizeBinary(64);
+        assert_eq!(parse_type_name(&dt.to_string()), dt);
+    }
+
+    // -----------------------------------------------------------------------
+    // schema_from_manifest
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_schema_from_manifest_empty_columns() {
+        let m = manifest(vec![]);
+        let schema = schema_from_manifest(&m);
+        assert_eq!(schema.fields().len(), 0);
+    }
+
+    #[test]
+    fn test_schema_from_manifest_single_column() {
+        let m = manifest(vec![col("id", "Int64", false, 0)]);
+        let schema = schema_from_manifest(&m);
+        assert_eq!(schema.fields().len(), 1);
+        assert_eq!(schema.field(0).name(), "id");
+        assert_eq!(schema.field(0).data_type(), &DataType::Int64);
+        assert!(!schema.field(0).is_nullable());
+    }
+
+    #[test]
+    fn test_schema_from_manifest_multiple_columns() {
+        let m = manifest(vec![
+            col("id", "Int64", false, 0),
+            col("name", "Utf8", true, 1),
+            col("score", "Float64", true, 2),
+            col("active", "Boolean", false, 3),
+        ]);
+        let schema = schema_from_manifest(&m);
+        assert_eq!(schema.fields().len(), 4);
+
+        assert_eq!(schema.field(0).name(), "id");
+        assert_eq!(schema.field(0).data_type(), &DataType::Int64);
+        assert!(!schema.field(0).is_nullable());
+
+        assert_eq!(schema.field(1).name(), "name");
+        assert_eq!(schema.field(1).data_type(), &DataType::Utf8);
+        assert!(schema.field(1).is_nullable());
+
+        assert_eq!(schema.field(2).name(), "score");
+        assert_eq!(schema.field(2).data_type(), &DataType::Float64);
+        assert!(schema.field(2).is_nullable());
+
+        assert_eq!(schema.field(3).name(), "active");
+        assert_eq!(schema.field(3).data_type(), &DataType::Boolean);
+        assert!(!schema.field(3).is_nullable());
+    }
+
+    #[test]
+    fn test_schema_from_manifest_preserves_nullable() {
+        let m = manifest(vec![
+            col("a", "Int32", true, 0),
+            col("b", "Int32", false, 1),
+        ]);
+        let schema = schema_from_manifest(&m);
+        assert!(schema.field(0).is_nullable());
+        assert!(!schema.field(1).is_nullable());
+    }
+
+    #[test]
+    fn test_schema_from_manifest_complex_types() {
+        let m = manifest(vec![
+            col("ts", "Timestamp(Nanosecond, None)", true, 0),
+            col("price", "Decimal128(18, 4)", true, 1),
+            col("data", "FixedSizeBinary(32)", false, 2),
+        ]);
+        let schema = schema_from_manifest(&m);
+        assert_eq!(schema.fields().len(), 3);
+
+        assert_eq!(
+            schema.field(0).data_type(),
+            &DataType::Timestamp(TimeUnit::Nanosecond, None)
+        );
+        assert_eq!(schema.field(1).data_type(), &DataType::Decimal128(18, 4));
+        assert_eq!(schema.field(2).data_type(), &DataType::FixedSizeBinary(32));
+    }
+
+    #[test]
+    fn test_schema_from_manifest_unknown_type_becomes_utf8() {
+        let m = manifest(vec![col("mystery", "SomeNewType", true, 0)]);
+        let schema = schema_from_manifest(&m);
+        assert_eq!(schema.field(0).data_type(), &DataType::Utf8);
+    }
+
+    #[test]
+    fn test_schema_from_manifest_timestamp_with_tz() {
+        let m = manifest(vec![col(
+            "event_time",
+            "Timestamp(Microsecond, \"UTC\")",
+            true,
+            0,
+        )]);
+        let schema = schema_from_manifest(&m);
+        assert_eq!(
+            schema.field(0).data_type(),
+            &DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ManifestMetadata JSON deserialization
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_manifest_metadata_deserialize_with_schema() {
+        let json = serde_json::json!({
+            "format": "ARROW_IPC",
+            "schema": {
+                "column_count": 2,
+                "columns": [
+                    {"name": "id", "type_name": "Int64", "nullable": false, "position": 0},
+                    {"name": "name", "type_name": "Utf8", "nullable": true, "position": 1}
+                ]
+            },
+            "total_row_count": 0,
+            "total_chunk_count": 0
+        });
+        let meta: ManifestMetadata =
+            serde_json::from_value(json).expect("should deserialize ManifestMetadata");
+        assert_eq!(meta.total_row_count, 0);
+        assert_eq!(meta.total_chunk_count, 0);
+
+        let schema_info = meta.schema.expect("schema should be present");
+        assert_eq!(schema_info.column_count, 2);
+        assert_eq!(schema_info.columns.len(), 2);
+        assert_eq!(schema_info.columns[0].name, "id");
+        assert_eq!(schema_info.columns[0].type_name, "Int64");
+        assert!(!schema_info.columns[0].nullable);
+        assert_eq!(schema_info.columns[1].name, "name");
+        assert_eq!(schema_info.columns[1].type_name, "Utf8");
+        assert!(schema_info.columns[1].nullable);
+    }
+
+    #[test]
+    fn test_manifest_metadata_deserialize_without_schema() {
+        let json = serde_json::json!({
+            "total_row_count": 100,
+            "total_chunk_count": 2
+        });
+        let meta: ManifestMetadata =
+            serde_json::from_value(json).expect("should deserialize ManifestMetadata");
+        assert_eq!(meta.total_row_count, 100);
+        assert_eq!(meta.total_chunk_count, 2);
+        assert!(meta.schema.is_none());
+        assert!(meta.format.is_none());
+    }
+
+    #[test]
+    fn test_manifest_metadata_deserialize_full_response() {
+        // Simulate the full JSON payload the server returns for a 0-row query.
+        let json = serde_json::json!({
+            "format": "ARROW_IPC",
+            "schema": {
+                "column_count": 3,
+                "columns": [
+                    {"name": "customer_id", "type_name": "Int32", "nullable": false, "position": 0},
+                    {"name": "total_sales", "type_name": "Decimal128(18, 2)", "nullable": true, "position": 1},
+                    {"name": "last_order", "type_name": "Timestamp(Millisecond, None)", "nullable": true, "position": 2}
+                ]
+            },
+            "total_row_count": 0,
+            "total_chunk_count": 0
+        });
+        let meta: ManifestMetadata =
+            serde_json::from_value(json).expect("should deserialize ManifestMetadata");
+        let schema = schema_from_manifest(meta.schema.as_ref().expect("schema should be present"));
+
+        assert_eq!(schema.fields().len(), 3);
+        assert_eq!(schema.field(0).name(), "customer_id");
+        assert_eq!(schema.field(0).data_type(), &DataType::Int32);
+        assert!(!schema.field(0).is_nullable());
+
+        assert_eq!(schema.field(1).name(), "total_sales");
+        assert_eq!(schema.field(1).data_type(), &DataType::Decimal128(18, 2));
+        assert!(schema.field(1).is_nullable());
+
+        assert_eq!(schema.field(2).name(), "last_order");
+        assert_eq!(
+            schema.field(2).data_type(),
+            &DataType::Timestamp(TimeUnit::Millisecond, None)
+        );
+        assert!(schema.field(2).is_nullable());
+    }
+
+    // -----------------------------------------------------------------------
+    // QueryResultStream::empty_with_schema
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn test_empty_with_schema_yields_one_empty_batch() {
+        let client = Arc::new(QueryHttpClient::new("http://unused:9999", None));
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Int32, false),
+            Field::new("b", DataType::Utf8, true),
+        ]));
+        let mut stream = QueryResultStream::empty_with_schema(
+            client,
+            "test-query-id".to_string(),
+            Arc::clone(&schema),
+        );
+
+        // First poll: should yield an empty batch with the correct schema.
+        let item = stream.next().await;
+        assert!(item.is_some(), "stream should yield one item");
+        let batch = item.expect("should have item").expect("should be Ok");
+        assert_eq!(batch.num_rows(), 0);
+        assert_eq!(batch.schema(), schema);
+        assert_eq!(batch.num_columns(), 2);
+        assert_eq!(batch.schema().field(0).name(), "a");
+        assert_eq!(batch.schema().field(1).name(), "b");
+
+        // Second poll: stream should be done.
+        let item = stream.next().await;
+        assert!(item.is_none(), "stream should be exhausted");
+    }
+
+    #[tokio::test]
+    async fn test_empty_with_schema_complex_types() {
+        let client = Arc::new(QueryHttpClient::new("http://unused:9999", None));
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
+                true,
+            ),
+            Field::new("amount", DataType::Decimal128(18, 4), false),
+            Field::new("payload", DataType::FixedSizeBinary(64), true),
+        ]));
+        let mut stream = QueryResultStream::empty_with_schema(
+            client,
+            "q-complex".to_string(),
+            Arc::clone(&schema),
+        );
+
+        let batch = stream
+            .next()
+            .await
+            .expect("should yield one item")
+            .expect("should be Ok");
+        assert_eq!(batch.num_rows(), 0);
+        assert_eq!(batch.schema(), schema);
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_empty_with_schema_no_columns() {
+        let client = Arc::new(QueryHttpClient::new("http://unused:9999", None));
+        let schema = Arc::new(Schema::empty());
+        let mut stream = QueryResultStream::empty_with_schema(
+            client,
+            "q-empty-schema".to_string(),
+            Arc::clone(&schema),
+        );
+
+        let batch = stream
+            .next()
+            .await
+            .expect("should yield one item")
+            .expect("should be Ok");
+        assert_eq!(batch.num_rows(), 0);
+        assert_eq!(batch.num_columns(), 0);
+        assert!(stream.next().await.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // End-to-end: manifest JSON → schema → empty RecordBatch
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn test_manifest_to_empty_batch_end_to_end() {
+        // Simulates the full path taken by results_stream when total_rows == 0:
+        // 1. Deserialize the manifest JSON
+        // 2. Build the Arrow schema via schema_from_manifest
+        // 3. Create a QueryResultStream::empty_with_schema
+        // 4. Verify the yielded batch has the correct schema and 0 rows
+        let json = serde_json::json!({
+            "format": "ARROW_IPC",
+            "schema": {
+                "column_count": 4,
+                "columns": [
+                    {"name": "order_id", "type_name": "Int64", "nullable": false, "position": 0},
+                    {"name": "customer", "type_name": "Utf8", "nullable": true, "position": 1},
+                    {"name": "amount", "type_name": "Decimal128(10, 2)", "nullable": true, "position": 2},
+                    {"name": "created_at", "type_name": "Timestamp(Microsecond, \"UTC\")", "nullable": false, "position": 3}
+                ]
+            },
+            "total_row_count": 0,
+            "total_chunk_count": 0
+        });
+        let meta: ManifestMetadata = serde_json::from_value(json).expect("should deserialize");
+        let schema = schema_from_manifest(meta.schema.as_ref().expect("schema present"));
+
+        let client = Arc::new(QueryHttpClient::new("http://unused:9999", None));
+        let mut stream =
+            QueryResultStream::empty_with_schema(client, "e2e-query".to_string(), schema);
+
+        let batch = stream
+            .next()
+            .await
+            .expect("should yield one item")
+            .expect("should be Ok");
+
+        assert_eq!(batch.num_rows(), 0);
+        assert_eq!(batch.num_columns(), 4);
+        assert_eq!(batch.schema().field(0).name(), "order_id");
+        assert_eq!(batch.schema().field(0).data_type(), &DataType::Int64);
+        assert!(!batch.schema().field(0).is_nullable());
+
+        assert_eq!(batch.schema().field(1).name(), "customer");
+        assert_eq!(batch.schema().field(1).data_type(), &DataType::Utf8);
+        assert!(batch.schema().field(1).is_nullable());
+
+        assert_eq!(batch.schema().field(2).name(), "amount");
+        assert_eq!(
+            batch.schema().field(2).data_type(),
+            &DataType::Decimal128(10, 2)
+        );
+
+        assert_eq!(batch.schema().field(3).name(), "created_at");
+        assert_eq!(
+            batch.schema().field(3).data_type(),
+            &DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
+        );
+        assert!(!batch.schema().field(3).is_nullable());
+
+        // Stream exhausted
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_manifest_to_empty_batch_all_nullable() {
+        let json = serde_json::json!({
+            "format": "ARROW_IPC",
+            "schema": {
+                "column_count": 2,
+                "columns": [
+                    {"name": "x", "type_name": "Float32", "nullable": true, "position": 0},
+                    {"name": "y", "type_name": "Float32", "nullable": true, "position": 1}
+                ]
+            },
+            "total_row_count": 0,
+            "total_chunk_count": 0
+        });
+        let meta: ManifestMetadata = serde_json::from_value(json).expect("should deserialize");
+        let schema = schema_from_manifest(meta.schema.as_ref().expect("schema present"));
+
+        let client = Arc::new(QueryHttpClient::new("http://unused:9999", None));
+        let mut stream =
+            QueryResultStream::empty_with_schema(client, "all-nullable".to_string(), schema);
+
+        let batch = stream
+            .next()
+            .await
+            .expect("should yield")
+            .expect("should be Ok");
+        assert_eq!(batch.num_rows(), 0);
+        assert!(batch.schema().field(0).is_nullable());
+        assert!(batch.schema().field(1).is_nullable());
+        assert!(stream.next().await.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // QueryStatus helpers
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_query_status_is_success() {
+        assert!(QueryStatus::Succeeded.is_success());
+        assert!(!QueryStatus::Failed.is_success());
+        assert!(!QueryStatus::Pending.is_success());
+        assert!(!QueryStatus::Running.is_success());
+        assert!(!QueryStatus::Cancelled.is_success());
+        assert!(!QueryStatus::Closed.is_success());
+    }
+
+    #[test]
+    fn test_query_status_is_terminal() {
+        assert!(QueryStatus::Succeeded.is_terminal());
+        assert!(QueryStatus::Failed.is_terminal());
+        assert!(QueryStatus::Cancelled.is_terminal());
+        assert!(QueryStatus::Closed.is_terminal());
+        assert!(!QueryStatus::Pending.is_terminal());
+        assert!(!QueryStatus::Running.is_terminal());
+    }
+
+    #[test]
+    fn test_query_status_is_running() {
+        assert!(QueryStatus::Pending.is_running());
+        assert!(QueryStatus::Running.is_running());
+        assert!(!QueryStatus::Succeeded.is_running());
+        assert!(!QueryStatus::Failed.is_running());
+    }
+
+    #[test]
+    fn test_query_status_display() {
+        assert_eq!(QueryStatus::Pending.to_string(), "PENDING");
+        assert_eq!(QueryStatus::Running.to_string(), "RUNNING");
+        assert_eq!(QueryStatus::Succeeded.to_string(), "SUCCEEDED");
+        assert_eq!(QueryStatus::Failed.to_string(), "FAILED");
+        assert_eq!(QueryStatus::Cancelled.to_string(), "CANCELLED");
+        assert_eq!(QueryStatus::Closed.to_string(), "CLOSED");
+    }
+
+    #[test]
+    fn test_query_status_serde_roundtrip() {
+        let statuses = vec![
+            QueryStatus::Pending,
+            QueryStatus::Running,
+            QueryStatus::Succeeded,
+            QueryStatus::Failed,
+            QueryStatus::Cancelled,
+            QueryStatus::Closed,
+        ];
+        for status in statuses {
+            let json = serde_json::to_string(&status).expect("should serialize");
+            let back: QueryStatus = serde_json::from_str(&json).expect("should deserialize");
+            assert_eq!(back, status, "roundtrip failed for {status}");
+        }
     }
 }
