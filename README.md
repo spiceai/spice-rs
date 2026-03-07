@@ -69,7 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 ### Parameterized queries
 
-For common scalar bindings, use `QueryParameters`. For advanced Arrow parameter batches, use `Client::sql_with_params`.
+For common scalar bindings, use `QueryParameters`. For any Arrow data type, wrap a one-element Arrow array with `QueryParameter::array(...)`. For advanced Arrow parameter batches, use `Client::sql_with_params`.
 
 ```rust,no_run
 use spiceai::{ClientBuilder, QueryParameters, StreamExt};

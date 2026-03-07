@@ -1,9 +1,9 @@
 #[cfg(test)]
 mod tests {
-    use arrow::array::{ArrayRef, Float64Array, Int32Array};
+    use arrow::array::{ArrayRef, BinaryArray, Float64Array, Int32Array, StringArray};
     use arrow::compute::concat_batches;
     use arrow::datatypes::{
-        DataType::{Float64, Int32},
+        DataType::{Binary, Float64, Int32, Utf8},
         Field, Schema,
     };
     use arrow::record_batch::RecordBatch;
@@ -46,6 +46,20 @@ mod tests {
         let columns = vec![
             Arc::new(Int32Array::from(vec![1])) as ArrayRef,
             Arc::new(Float64Array::from(vec![1.0])) as ArrayRef,
+        ];
+
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
+            .expect("Failed to create RecordBatch")
+    }
+
+    pub fn create_string_binary_param_batch() -> RecordBatch {
+        let fields = vec![
+            Arc::new(Field::new("$1", Utf8, true)),
+            Arc::new(Field::new("$2", Binary, true)),
+        ];
+        let columns = vec![
+            Arc::new(StringArray::from(vec![Some("taxi")])) as ArrayRef,
+            Arc::new(BinaryArray::from(vec![Some(b"cab".as_slice())])) as ArrayRef,
         ];
 
         RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
@@ -261,6 +275,110 @@ mod tests {
                 assert_eq!(batch_concat.num_columns(), 3);
                 assert_eq!(batch_concat.num_rows(), 5);
                 assert_eq!(formatted, get_expected_result());
+            }
+            Err(e) => {
+                panic!("Error: {e}");
+            }
+        };
+    }
+
+    // skip on Windows as we do not provide a spice runtime for Windows
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn test_local_query_with_string_and_binary_bindings() {
+        let _ = rustls::crypto::CryptoProvider::install_default(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        );
+        let spice_client = new_local_client().await;
+        match spice_client
+            .sql_with_bindings(
+                "SELECT $1 AS text_value, $2 AS bytes_value",
+                QueryParameters::new().push("taxi").push(b"cab".as_slice()),
+            )
+            .await
+        {
+            Ok(mut flight_data_stream) => {
+                let mut batches = Vec::new();
+                while let Some(batch) = flight_data_stream.next().await {
+                    match batch {
+                        Ok(batch) => {
+                            batches.push(batch);
+                        }
+                        Err(e) => {
+                            panic!("Error: {e}")
+                        }
+                    }
+                }
+
+                let batch_concat = concat_batches(&batches[0].schema(), &batches)
+                    .expect("Failed to concat batches");
+                assert_eq!(batch_concat.num_columns(), 2);
+                assert_eq!(batch_concat.num_rows(), 1);
+
+                let text_values = batch_concat
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .expect("text_value should be Utf8");
+                assert_eq!(text_values.value(0), "taxi");
+
+                let binary_values = batch_concat
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<BinaryArray>()
+                    .expect("bytes_value should be Binary");
+                assert_eq!(binary_values.value(0), b"cab");
+            }
+            Err(e) => {
+                panic!("Error: {e}");
+            }
+        };
+    }
+
+    // skip on Windows as we do not provide a spice runtime for Windows
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn test_local_query_with_string_and_binary_params() {
+        let _ = rustls::crypto::CryptoProvider::install_default(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        );
+        let spice_client = new_local_client().await;
+        let params = create_string_binary_param_batch();
+        match spice_client
+            .sql_with_params("SELECT $1 AS text_value, $2 AS bytes_value", Some(params))
+            .await
+        {
+            Ok(mut flight_data_stream) => {
+                let mut batches = Vec::new();
+                while let Some(batch) = flight_data_stream.next().await {
+                    match batch {
+                        Ok(batch) => {
+                            batches.push(batch);
+                        }
+                        Err(e) => {
+                            panic!("Error: {e}")
+                        }
+                    }
+                }
+
+                let batch_concat = concat_batches(&batches[0].schema(), &batches)
+                    .expect("Failed to concat batches");
+                assert_eq!(batch_concat.num_columns(), 2);
+                assert_eq!(batch_concat.num_rows(), 1);
+
+                let text_values = batch_concat
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .expect("text_value should be Utf8");
+                assert_eq!(text_values.value(0), "taxi");
+
+                let binary_values = batch_concat
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<BinaryArray>()
+                    .expect("bytes_value should be Binary");
+                assert_eq!(binary_values.value(0), b"cab");
             }
             Err(e) => {
                 panic!("Error: {e}");
