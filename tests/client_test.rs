@@ -180,6 +180,94 @@ mod tests {
         };
     }
 
+    // skip on Windows as we do not provide a spice runtime for Windows
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn test_local_query_with_params_none() {
+        let _ = rustls::crypto::CryptoProvider::install_default(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        );
+        let spice_client = new_local_client().await;
+        match spice_client
+            .sql_with_params(
+                "SELECT VendorID, tpep_pickup_datetime, fare_amount FROM taxi_trips WHERE VendorID == 1 and fare_amount > 1.0 ORDER BY fare_amount, tpep_pickup_datetime LIMIT 5;",
+                None,
+            )
+            .await
+        {
+            Ok(mut flight_data_stream) => {
+                let mut batches = Vec::new();
+                while let Some(batch) = flight_data_stream.next().await {
+                    match batch {
+                        Ok(batch) => {
+                            batches.push(batch);
+                        }
+                        Err(e) => {
+                            panic!("Error: {e}")
+                        }
+                    }
+                }
+                let batch_concat = concat_batches(&batches[0].schema(), &batches)
+                    .expect("Failed to concat batches");
+                let formatted = format!(
+                    "{}",
+                    pretty_format_batches(&[batch_concat.clone()])
+                        .expect("Failed to format batches")
+                );
+                assert_eq!(batch_concat.num_columns(), 3);
+                assert_eq!(batch_concat.num_rows(), 5);
+                assert_eq!(formatted, get_expected_result());
+            }
+            Err(e) => {
+                panic!("Error: {e}");
+            }
+        };
+    }
+
+    // skip on Windows as we do not provide a spice runtime for Windows
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn test_local_query_with_empty_bindings() {
+        let _ = rustls::crypto::CryptoProvider::install_default(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        );
+        let spice_client = new_local_client().await;
+        match spice_client
+            .sql_with_bindings(
+                "SELECT VendorID, tpep_pickup_datetime, fare_amount FROM taxi_trips WHERE VendorID == 1 and fare_amount > 1.0 ORDER BY fare_amount, tpep_pickup_datetime LIMIT 5;",
+                QueryParameters::new(),
+            )
+            .await
+        {
+            Ok(mut flight_data_stream) => {
+                let mut batches = Vec::new();
+                while let Some(batch) = flight_data_stream.next().await {
+                    match batch {
+                        Ok(batch) => {
+                            batches.push(batch);
+                        }
+                        Err(e) => {
+                            panic!("Error: {e}")
+                        }
+                    }
+                }
+                let batch_concat = concat_batches(&batches[0].schema(), &batches)
+                    .expect("Failed to concat batches");
+                let formatted = format!(
+                    "{}",
+                    pretty_format_batches(&[batch_concat.clone()])
+                        .expect("Failed to format batches")
+                );
+                assert_eq!(batch_concat.num_columns(), 3);
+                assert_eq!(batch_concat.num_rows(), 5);
+                assert_eq!(formatted, get_expected_result());
+            }
+            Err(e) => {
+                panic!("Error: {e}");
+            }
+        };
+    }
+
     #[tokio::test]
     async fn test_query() {
         let spice_client = new_cloud_client().await;

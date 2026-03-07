@@ -603,6 +603,54 @@ impl SpiceClientBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dataset::DatasetRefreshMode;
+    use crate::query::QueryStatus;
+    use arrow::array::Int32Array;
+    use futures::TryStreamExt;
+    use serde_json::json;
+    use std::time::Duration;
+    use tonic::transport::Endpoint;
+    use wiremock::matchers::{body_json, method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn test_client(http_base_url: Option<&str>) -> SpiceClient {
+        let flight_channel = Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
+
+        SpiceClient {
+            flight: Arc::new(SqlFlightClient::new(
+                flight_channel,
+                None,
+                None,
+                None,
+                MAX_RETRIES,
+            )),
+            http_client: http_base_url
+                .map(|base_url| Arc::new(QueryHttpClient::new(base_url, None))),
+        }
+    }
+
+    fn query_manifest_response(query_id: &str, status: QueryStatus) -> serde_json::Value {
+        json!({
+            "query_id": query_id,
+            "status": status,
+            "manifest": {
+                "format": "json",
+                "schema": {
+                    "column_count": 1,
+                    "columns": [
+                        {
+                            "name": "answer",
+                            "type_name": "Int32",
+                            "nullable": false,
+                            "position": 0
+                        }
+                    ]
+                },
+                "total_row_count": 2,
+                "total_chunk_count": 1
+            }
+        })
+    }
 
     #[test]
     fn test_client_builder_default() {
@@ -826,5 +874,268 @@ mod tests {
             .user_agent("  agent  ");
         assert_eq!(builder.api_key, Some("  key with spaces  ".to_string()));
         assert_eq!(builder.user_agent, Some("  agent  ".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_async_methods_require_http_url() {
+        let client = test_client(None);
+
+        assert!(matches!(
+            client.query("SELECT 1").await,
+            Err(QueryError::HttpError { .. })
+        ));
+        assert!(matches!(
+            client.queries(None, None).await,
+            Err(QueryError::HttpError { .. })
+        ));
+        assert!(matches!(
+            client.get_query("qry_123"),
+            Err(QueryError::HttpError { .. })
+        ));
+        assert!(matches!(
+            client.cancel_query("qry_123").await,
+            Err(QueryError::HttpError { .. })
+        ));
+        assert!(matches!(
+            client.refresh_dataset("orders").await,
+            Err(DatasetError::HttpError { .. })
+        ));
+        assert!(matches!(
+            client
+                .refresh_dataset_with_options(
+                    "orders",
+                    DatasetRefreshRequest::new().with_refresh_mode(DatasetRefreshMode::Append),
+                )
+                .await,
+            Err(DatasetError::HttpError { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_async_query_wrappers_and_job_lifecycle() {
+        let server = MockServer::start().await;
+        let query_id = "qry_123";
+
+        Mock::given(method("POST"))
+            .and(path("/v1/queries"))
+            .and(body_json(json!({ "sql": "SELECT 1" })))
+            .respond_with(
+                ResponseTemplate::new(202).set_body_json(json!({
+                    "query_id": query_id,
+                    "status": "PENDING",
+                    "status_url": format!("{}/v1/queries/{query_id}/status", server.uri()),
+                    "results_url": format!("{}/v1/queries/{query_id}/results", server.uri())
+                })),
+            )
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1/queries"))
+            .and(query_param("status", "running"))
+            .and(query_param("limit", "5"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "queries": [
+                        {
+                            "query_id": query_id,
+                            "status": "RUNNING",
+                            "created_at": "2025-01-01T00:00:00Z",
+                            "sql_preview": "SELECT 1"
+                        }
+                    ],
+                    "total_count": 1
+                })),
+            )
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/queries/{query_id}/status")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "status": "RUNNING"
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/queries/{query_id}")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(query_manifest_response(
+                    query_id,
+                    QueryStatus::Succeeded,
+                )),
+            )
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/queries/{query_id}/results/chunks/0")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "chunk_index": 0,
+                "row_offset": 0,
+                "row_count": 2,
+                "data_array": [
+                    { "answer": 1 },
+                    { "answer": 2 }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path(format!("/v1/queries/{query_id}/cancel")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "query_id": query_id,
+                "status": "CANCELLED"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = test_client(Some(&server.uri()));
+
+        let queries = client
+            .queries(Some("running"), Some(5))
+            .await
+            .expect("list async queries");
+        assert_eq!(queries.total_count, Some(1));
+        assert_eq!(queries.queries.len(), 1);
+        assert_eq!(queries.queries[0].query_id, query_id);
+        assert_eq!(queries.queries[0].status, QueryStatus::Running);
+
+        let job = client.query("SELECT 1").await.expect("submit async query");
+        assert_eq!(job.id(), query_id);
+        assert_eq!(job.status().await.expect("get query status"), QueryStatus::Running);
+
+        let info = job.info().await.expect("get query info");
+        assert_eq!(info.query_id, query_id);
+        assert_eq!(info.status, QueryStatus::Succeeded);
+        let info_result = info.result.expect("query result metadata");
+        assert_eq!(info_result.total_rows, 2);
+        assert_eq!(info_result.total_chunks, 1);
+
+        let wait_result = job.wait().await.expect("wait for query completion");
+        assert_eq!(wait_result.total_rows, 2);
+        assert_eq!(wait_result.total_chunks, 1);
+
+        let wait_timeout_result = client
+            .get_query(query_id)
+            .expect("resume query handle")
+            .with_poll_interval(Duration::from_millis(1))
+            .wait_timeout(Duration::from_millis(10))
+            .await
+            .expect("wait for query completion with timeout");
+        assert_eq!(wait_timeout_result.total_rows, 2);
+
+        let batches = client
+            .get_query(query_id)
+            .expect("resume query handle")
+            .results()
+            .await
+            .expect("fetch query results");
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), 2);
+        let answers = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .expect("downcast answer column to Int32Array");
+        assert_eq!(answers.value(0), 1);
+        assert_eq!(answers.value(1), 2);
+
+        let streamed_batches = client
+            .get_query(query_id)
+            .expect("resume query handle")
+            .results_stream()
+            .await
+            .expect("stream query results")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("collect streamed query results");
+        assert_eq!(streamed_batches.len(), 1);
+        assert_eq!(streamed_batches[0].num_rows(), 2);
+
+        let cancelled = job.cancel().await.expect("cancel query from job handle");
+        assert_eq!(cancelled.query_id, query_id);
+        assert_eq!(cancelled.status, QueryStatus::Cancelled);
+
+        let cancelled_via_client = client
+            .cancel_query(query_id)
+            .await
+            .expect("cancel query from client wrapper");
+        assert_eq!(cancelled_via_client.query_id, query_id);
+        assert_eq!(cancelled_via_client.status, QueryStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn test_query_job_wait_timeout_returns_timeout_for_running_query() {
+        let server = MockServer::start().await;
+        let query_id = "qry_timeout";
+
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/queries/{query_id}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "query_id": query_id,
+                "status": "RUNNING"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = test_client(Some(&server.uri()));
+        let err = client
+            .get_query(query_id)
+            .expect("create query handle")
+            .with_poll_interval(Duration::from_millis(1))
+            .wait_timeout(Duration::from_millis(5))
+            .await
+            .expect_err("query wait should time out while still running");
+
+        assert!(matches!(err, QueryError::Timeout { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_refresh_dataset_wrappers() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/datasets/orders_default/acceleration/refresh"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "message": "Refresh started"
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/datasets/orders_custom/acceleration/refresh"))
+            .and(body_json(json!({
+                "refresh_sql": "SELECT * FROM orders",
+                "refresh_mode": "append",
+                "refresh_jitter_max": "30s"
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "message": "Refresh scheduled"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = test_client(Some(&server.uri()));
+
+        let default_refresh = client
+            .refresh_dataset("orders_default")
+            .await
+            .expect("refresh dataset with default settings");
+        assert_eq!(default_refresh.message, "Refresh started");
+
+        let custom_refresh = client
+            .refresh_dataset_with_options(
+                "orders_custom",
+                DatasetRefreshRequest::new()
+                    .with_refresh_sql("SELECT * FROM orders")
+                    .with_refresh_mode(DatasetRefreshMode::Append)
+                    .with_refresh_jitter_max("30s"),
+            )
+            .await
+            .expect("refresh dataset with explicit overrides");
+        assert_eq!(custom_refresh.message, "Refresh scheduled");
     }
 }
