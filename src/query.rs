@@ -33,6 +33,7 @@
 //! }
 //! ```
 
+use crate::dataset::{DatasetError, DatasetRefreshRequest, DatasetRefreshResponse};
 use arrow::array::RecordBatch;
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use futures::Stream;
@@ -613,6 +614,73 @@ impl QueryHttpClient {
             status_code => {
                 let response_body = response.text().await.unwrap_or_default();
                 Err(QueryError::HttpRequestFailed {
+                    status_code,
+                    response_body,
+                })
+            }
+        }
+    }
+
+    pub async fn refresh_dataset(
+        &self,
+        dataset_name: &str,
+        request: &DatasetRefreshRequest,
+    ) -> Result<DatasetRefreshResponse, DatasetError> {
+        let mut url = reqwest::Url::parse(&self.base_url).map_err(|e| DatasetError::HttpError {
+            dataset_name: dataset_name.to_string(),
+            message: e.to_string(),
+        })?;
+        {
+            let mut path_segments =
+                url.path_segments_mut()
+                    .map_err(|_| DatasetError::HttpError {
+                        dataset_name: dataset_name.to_string(),
+                        message: "Base URL cannot be used for dataset refresh".to_string(),
+                    })?;
+            path_segments.push("v1");
+            path_segments.push("datasets");
+            path_segments.push(dataset_name);
+            path_segments.push("acceleration");
+            path_segments.push("refresh");
+        }
+
+        let request_builder = self.add_auth(self.client.post(url));
+        let response = if request.has_overrides() {
+            request_builder.json(request).send().await
+        } else {
+            request_builder.send().await
+        }
+        .map_err(|e| DatasetError::HttpError {
+            dataset_name: dataset_name.to_string(),
+            message: e.to_string(),
+        })?;
+
+        match response.status().as_u16() {
+            200 | 201 => response.json().await.map_err(|e| DatasetError::ParseError {
+                dataset_name: dataset_name.to_string(),
+                message: e.to_string(),
+            }),
+            400 => {
+                let response_body = response.text().await.unwrap_or_default();
+                if response_body.contains("does not have acceleration enabled") {
+                    Err(DatasetError::AccelerationNotEnabled {
+                        dataset_name: dataset_name.to_string(),
+                    })
+                } else {
+                    Err(DatasetError::RefreshFailed {
+                        dataset_name: dataset_name.to_string(),
+                        status_code: 400,
+                        response_body,
+                    })
+                }
+            }
+            404 => Err(DatasetError::NotFound {
+                dataset_name: dataset_name.to_string(),
+            }),
+            status_code => {
+                let response_body = response.text().await.unwrap_or_default();
+                Err(DatasetError::RefreshFailed {
+                    dataset_name: dataset_name.to_string(),
                     status_code,
                     response_body,
                 })

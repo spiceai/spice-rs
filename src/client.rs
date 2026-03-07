@@ -1,8 +1,10 @@
 use crate::flight::RetryableQueryStream;
+use crate::params::{QueryParameterError, QueryParameters};
 use crate::query::{QueryError, QueryHttpClient, QueryJob};
 use crate::util::{FibonacciBackoffBuilder, RetryError, retry};
 use crate::{
     config::{GenericError, SPICE_CLOUD_FLIGHT_ADDR, SPICE_LOCAL_FLIGHT_ADDR},
+    dataset::{DatasetError, DatasetRefreshRequest, DatasetRefreshResponse},
     flight::{SqlFlightClient, is_connection_reset_generic_error},
     tls::{ensure_crypto_provider, new_tls_flight_channel},
 };
@@ -21,6 +23,9 @@ pub enum Error {
     Query {
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+
+    #[snafu(display("Failed to build query parameters: {source}"))]
+    ParameterBindings { source: QueryParameterError },
 
     #[snafu(display("Failed to process query stream: {source}"))]
     QueryStream { source: FlightError },
@@ -45,8 +50,8 @@ impl SpiceClientConfig {
     }
 }
 
-/// The `SpiceClient` is the main entry point for interacting with the Spice API.
-/// It provides methods for querying the Spice Flight endpoint.
+/// The `SpiceClient` is the main entry point for interacting with Spice.
+/// It provides methods for Flight SQL queries and runtime HTTP APIs.
 #[allow(clippy::module_name_repetitions)]
 #[derive(Clone)]
 pub struct SpiceClient {
@@ -179,6 +184,46 @@ impl SpiceClient {
         })
         .await
         .map_err(|e| Error::Query { source: e })
+    }
+
+    /// Executes a synchronous parameterized SQL query using scalar bindings.
+    ///
+    /// This is a convenience wrapper over [`sql_with_params()`](Self::sql_with_params)
+    /// for the common case of binding a single row of scalar values. For advanced
+    /// Arrow parameter batches, use [`sql_with_params()`](Self::sql_with_params).
+    ///
+    /// ```
+    /// # use spiceai::{Client, QueryParameters};
+    /// #
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// #  let client = Client::new("API_KEY").await.unwrap();
+    /// #  let _ = client
+    /// #    .sql_with_bindings(
+    /// #      "SELECT * FROM taxi_trips WHERE VendorID = $1 AND fare_amount > $2 LIMIT 10;",
+    /// #      QueryParameters::new().push(1_i32).push(1.0_f64),
+    /// #    )
+    /// #    .await;
+    /// # }
+    /// ```
+    ///
+    /// ## Errors
+    ///
+    /// - [`Error::ParameterBindings`] if the bindings cannot be converted into an Arrow batch
+    /// - [`Error::Query`] for query execution errors
+    pub async fn sql_with_bindings(
+        &self,
+        query: &str,
+        params: QueryParameters,
+    ) -> Result<RetryableQueryStream, Error> {
+        let params = params
+            .into_record_batch()
+            .map_err(|source| Error::ParameterBindings { source })?;
+
+        match params {
+            Some(params) => self.sql_with_params(query, Some(params)).await,
+            None => self.sql(query).await,
+        }
     }
 
     /// Submits an async SQL query and returns a [`QueryJob`] handle.
@@ -369,6 +414,49 @@ impl SpiceClient {
         let job = QueryJob::new(query_id.to_string(), Arc::clone(http_client));
         job.cancel().await
     }
+
+    /// Triggers an on-demand refresh for an accelerated dataset.
+    ///
+    /// **Note:** Requires [`http_url()`](SpiceClientBuilder::http_url) to be configured.
+    ///
+    /// ```no_run
+    /// # use spiceai::ClientBuilder;
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    /// let client = ClientBuilder::new()
+    ///     .http_url("http://localhost:8090")
+    ///     .build()
+    ///     .await?;
+    ///
+    /// let response = client.refresh_dataset("taxi_trips").await?;
+    /// println!("{}", response.message);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn refresh_dataset(
+        &self,
+        dataset_name: &str,
+    ) -> Result<DatasetRefreshResponse, DatasetError> {
+        self.refresh_dataset_with_options(dataset_name, DatasetRefreshRequest::default())
+            .await
+    }
+
+    /// Triggers an on-demand refresh for an accelerated dataset with overrides.
+    ///
+    /// **Note:** Requires [`http_url()`](SpiceClientBuilder::http_url) to be configured.
+    pub async fn refresh_dataset_with_options(
+        &self,
+        dataset_name: &str,
+        request: DatasetRefreshRequest,
+    ) -> Result<DatasetRefreshResponse, DatasetError> {
+        let http_client = self.http_client.as_ref().ok_or(DatasetError::HttpError {
+            dataset_name: dataset_name.to_string(),
+            message: "HTTP endpoint not configured. Use ClientBuilder::http_url() to set it."
+                .to_string(),
+        })?;
+
+        http_client.refresh_dataset(dataset_name, &request).await
+    }
 }
 
 /// Builder for creating a `SpiceClient`.
@@ -472,9 +560,9 @@ impl SpiceClientBuilder {
         self
     }
 
-    /// Configures the HTTP endpoint for async query API (`/v1/queries`).
+    /// Configures the HTTP endpoint for runtime HTTP APIs.
     ///
-    /// This endpoint is required for using the async [`SpiceClient::query()`] method.
+    /// This endpoint is required for using async query management and dataset refresh APIs.
     /// Typically this is `http://localhost:8090` for local development or the
     /// HTTP API endpoint for your Spice.ai cluster.
     #[must_use]

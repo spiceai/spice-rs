@@ -2,35 +2,154 @@ name: crates-publish
 
 on:
   release:
-    types: [published]
+    types: [published, released, edited]
 
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Git tag to publish, for example v3.2.0
+        required: true
+        type: string
+
+  workflow_call:
+    inputs:
+      tag:
+        description: Git tag to publish, for example v3.2.0
+        required: false
+        type: string
 
 jobs:
   publish:
+    concurrency:
+      group: crates-publish-${{ github.event.release.tag_name || inputs.tag || github.ref }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     environment: cratesio
     permissions:
+      contents: read
       id-token: write # Required for OIDC token exchange with crates.io
     steps:
       # actions/checkout v4.2.2
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag || github.ref }}
+
+      - name: Determine whether publish should run
+        id: preflight
+        env:
+          EVENT_ACTION: ${{ github.event.action }}
+          EVENT_NAME: ${{ github.event_name }}
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_DRAFT: ${{ github.event.release.draft }}
+          RELEASE_ID: ${{ github.event.release.id }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          should_publish=false
+          skip_reason=''
+
+          if [[ "${EVENT_NAME}" == "release" ]]; then
+            if [[ "${RELEASE_DRAFT}" == "true" ]]; then
+              skip_reason='Draft releases do not trigger publishing.'
+            elif [[ "${EVENT_ACTION}" == "published" || "${EVENT_ACTION}" == "released" ]]; then
+              should_publish=true
+            elif [[ "${EVENT_ACTION}" == "edited" ]]; then
+              latest_release_id="$({
+                curl -fsSL \
+                  -H "Accept: application/vnd.github+json" \
+                  -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                  -H "X-GitHub-Api-Version: 2022-11-28" \
+                  "https://api.github.com/repos/${REPOSITORY}/releases/latest" |
+                  jq -r '.id'
+              } 2>/dev/null || true)"
+
+              if [[ -n "${latest_release_id}" && "${latest_release_id}" == "${RELEASE_ID}" ]]; then
+                should_publish=true
+              else
+                skip_reason='Edited release is not the latest published release.'
+              fi
+            else
+              skip_reason="Release action ${EVENT_ACTION} does not trigger publishing."
+            fi
+          else
+            should_publish=true
+          fi
+
+          crate_name="$(awk -F'"' '
+            $0 == "[package]" { in_package=1; next }
+            /^\[/ && $0 != "[package]" { in_package=0 }
+            in_package && $1 ~ /^[[:space:]]*name = / { print $2; exit }
+          ' Cargo.toml)"
+
+          crate_version="$(awk -F'"' '
+            $0 == "[package]" { in_package=1; next }
+            /^\[/ && $0 != "[package]" { in_package=0 }
+            in_package && $1 ~ /^[[:space:]]*version = / { print $2; exit }
+          ' Cargo.toml)"
+
+          if [[ -z "${crate_name}" || -z "${crate_version}" ]]; then
+            echo "Failed to determine crate metadata from Cargo.toml" >&2
+            exit 1
+          fi
+
+          if [[ -n "${RELEASE_TAG}" ]]; then
+            if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "Release tag ${RELEASE_TAG} must match vX.Y.Z or vX.Y.Z-suffix" >&2
+              exit 1
+            fi
+
+            tag_version="${RELEASE_TAG#v}"
+            if [[ "${crate_version}" != "${tag_version}" ]]; then
+              echo "Release tag ${RELEASE_TAG} does not match Cargo.toml version ${crate_version}" >&2
+              exit 1
+            fi
+          elif [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            echo "workflow_dispatch requires a tag input" >&2
+            exit 1
+          fi
+
+          if [[ "${should_publish}" == "true" ]]; then
+            if curl -fsSL "https://crates.io/api/v1/crates/${crate_name}/${crate_version}" >/dev/null; then
+              should_publish=false
+              skip_reason="${crate_name} ${crate_version} is already published to crates.io."
+            fi
+          fi
+
+          if [[ "${should_publish}" == "true" ]]; then
+            decision_message="Publishing ${crate_name} ${crate_version}."
+          else
+            decision_message="${skip_reason}"
+          fi
+
+          echo "should_publish=${should_publish}" >> "${GITHUB_OUTPUT}"
+          echo "crate_name=${crate_name}" >> "${GITHUB_OUTPUT}"
+          echo "crate_version=${crate_version}" >> "${GITHUB_OUTPUT}"
+          echo "decision_message=${decision_message}" >> "${GITHUB_OUTPUT}"
+
+      - name: Publish decision
+        run: echo "${{ steps.preflight.outputs.decision_message }}"
 
       # rust-lang/crates-io-auth-action v1.0.1
       # https://github.com/rust-lang/crates-io-auth-action/releases/tag/v1.0.1
       - uses: rust-lang/crates-io-auth-action@e919bc7605cde86df457cf5b93c5e103838bd879
         id: auth
+        if: ${{ steps.preflight.outputs.should_publish == 'true' }}
 
       - name: Install Rust toolchain
         # actions-rs/toolchain v1.0.7
         uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af
+        if: ${{ steps.preflight.outputs.should_publish == 'true' }}
         with:
           profile: minimal
           toolchain: stable
           override: true
 
       - run: cargo build
+        if: ${{ steps.preflight.outputs.should_publish == 'true' }}
 
       - run: cargo publish
+        if: ${{ steps.preflight.outputs.should_publish == 'true' }}
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
