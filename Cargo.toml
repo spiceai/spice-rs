@@ -2,6 +2,7 @@
 name = "spiceai"
 version = "3.2.0"
 edition = "2024"
+rust-version = "1.93.1"
 description = "SDK for Spice.ai, an open-source runtime and platform for building AI-driven software."
 license = "Apache-2.0"
 
