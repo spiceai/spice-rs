@@ -3,6 +3,7 @@ use base64::{Engine as _, engine::general_purpose};
 use std::io::Write;
 use std::str::FromStr;
 use std::sync::Once;
+use std::time::Duration;
 
 use tonic::transport::Channel;
 use tonic::transport::channel::{ClientTlsConfig, Endpoint};
@@ -34,6 +35,16 @@ pub async fn new_tls_flight_channel(https_url: &str) -> Result<Channel, GenericE
             .domain_name(https_url.trim_start_matches("https://"));
         endpoint = endpoint.tls_config(tls_config)?;
     }
+
+    // Configure HTTP/2 keep-alive so that stale connections (e.g. after an ALB
+    // target IP change) are detected quickly.  When the keep-alive probe fails,
+    // tonic's built-in Reconnect layer drops the dead connection and establishes
+    // a new one, which triggers a fresh DNS lookup.
+    endpoint = endpoint
+        .keep_alive_while_idle(true)
+        .http2_keep_alive_interval(Duration::from_secs(60))
+        .keep_alive_timeout(Duration::from_secs(20))
+        .tcp_keepalive(Some(Duration::from_secs(60)));
 
     Ok(endpoint.connect().await?)
 }
