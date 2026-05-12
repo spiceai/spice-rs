@@ -4,7 +4,7 @@ mod client;
 mod config;
 mod flight;
 pub mod query;
-mod tls;
+pub mod tls;
 mod util;
 
 pub use client::Error as SpiceClientError;
