@@ -4,7 +4,7 @@ use crate::util::{FibonacciBackoffBuilder, RetryError, retry};
 use crate::{
     config::{GenericError, SPICE_CLOUD_FLIGHT_ADDR, SPICE_LOCAL_FLIGHT_ADDR},
     flight::{SqlFlightClient, is_connection_reset_generic_error},
-    tls::{ensure_crypto_provider, new_tls_flight_channel},
+    tls::{FlightChannelBuilder, ensure_crypto_provider, new_tls_flight_channel},
 };
 use arrow::record_batch::RecordBatch;
 use arrow_flight::error::FlightError;
@@ -408,6 +408,9 @@ pub struct SpiceClientBuilder {
     http_url: Option<String>,
     cache_control: Option<String>,
     max_retries: u32,
+    tls_client_certificate_file: Option<String>,
+    tls_client_key_file: Option<String>,
+    tls_ca_certificate_file: Option<String>,
 }
 
 impl Default for SpiceClientBuilder {
@@ -426,6 +429,9 @@ impl SpiceClientBuilder {
             http_url: None,
             cache_control: None,
             max_retries: MAX_RETRIES,
+            tls_client_certificate_file: None,
+            tls_client_key_file: None,
+            tls_ca_certificate_file: None,
         }
     }
 
@@ -483,6 +489,30 @@ impl SpiceClientBuilder {
         self
     }
 
+    /// Sets the path to a PEM-encoded client certificate file for mTLS.
+    /// Must be used together with [`tls_client_key_file`](Self::tls_client_key_file).
+    #[must_use]
+    pub fn tls_client_certificate_file(mut self, path: &str) -> Self {
+        self.tls_client_certificate_file = Some(path.to_string());
+        self
+    }
+
+    /// Sets the path to a PEM-encoded client private key file for mTLS.
+    /// Must be used together with [`tls_client_certificate_file`](Self::tls_client_certificate_file).
+    #[must_use]
+    pub fn tls_client_key_file(mut self, path: &str) -> Self {
+        self.tls_client_key_file = Some(path.to_string());
+        self
+    }
+
+    /// Sets the path to a custom CA certificate file for server verification.
+    /// When set, this CA is used instead of the system certificate store.
+    #[must_use]
+    pub fn tls_ca_certificate_file(mut self, path: &str) -> Self {
+        self.tls_ca_certificate_file = Some(path.to_string());
+        self
+    }
+
     /// Builds the `SpiceClient` with the specified configuration.
     ///
     /// ## Errors
@@ -490,14 +520,57 @@ impl SpiceClientBuilder {
     /// - `Box<dyn Error + Send + Sync>` if flight channel creation fails
     pub async fn build(self) -> Result<SpiceClient, GenericError> {
         ensure_crypto_provider();
-        let flight_channel = match self.flight_url {
-            Some(url) => new_tls_flight_channel(&url).await?,
-            None => new_tls_flight_channel(SPICE_LOCAL_FLIGHT_ADDR).await?,
-        };
 
-        let http_client = self
-            .http_url
-            .map(|url| Arc::new(QueryHttpClient::new(&url, self.api_key.clone())));
+        // Validate that client cert and key are either both set or both unset
+        match (&self.tls_client_certificate_file, &self.tls_client_key_file) {
+            (Some(_), None) => {
+                return Err("tls_client_certificate_file is set but tls_client_key_file is missing; both must be provided together for mTLS".into());
+            }
+            (None, Some(_)) => {
+                return Err("tls_client_key_file is set but tls_client_certificate_file is missing; both must be provided together for mTLS".into());
+            }
+            _ => {}
+        }
+
+        let url = self
+            .flight_url
+            .as_deref()
+            .unwrap_or(SPICE_LOCAL_FLIGHT_ADDR);
+
+        let mut channel_builder = FlightChannelBuilder::new(url);
+        if let (Some(cert), Some(key)) =
+            (&self.tls_client_certificate_file, &self.tls_client_key_file)
+        {
+            channel_builder = channel_builder.with_client_certificate(cert, key);
+        }
+        if let Some(ca) = &self.tls_ca_certificate_file {
+            channel_builder = channel_builder.with_ca_certificate(ca);
+        }
+        let flight_channel = channel_builder.build().await?;
+
+        let http_client = if let Some(url) = self.http_url {
+            let mut builder = reqwest::Client::builder();
+            if let (Some(cert_path), Some(key_path)) =
+                (&self.tls_client_certificate_file, &self.tls_client_key_file)
+            {
+                let cert_pem = tokio::fs::read(cert_path).await?;
+                let key_pem = tokio::fs::read(key_path).await?;
+                let identity = reqwest::Identity::from_pem(&[cert_pem, key_pem].concat())?;
+                builder = builder.identity(identity);
+            }
+            if let Some(ca_path) = &self.tls_ca_certificate_file {
+                let ca_pem = tokio::fs::read(ca_path).await?;
+                let ca = reqwest::Certificate::from_pem(&ca_pem)?;
+                builder = builder.add_root_certificate(ca);
+            }
+            Some(Arc::new(QueryHttpClient::with_client(
+                builder.build()?,
+                &url,
+                self.api_key.clone(),
+            )))
+        } else {
+            None
+        };
 
         Ok(SpiceClient {
             flight: Arc::new(SqlFlightClient::new(
