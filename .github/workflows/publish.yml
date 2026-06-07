@@ -143,7 +143,7 @@ jobs:
         if: ${{ steps.preflight.outputs.should_publish == 'true' }}
         with:
           profile: minimal
-          toolchain: stable
+          toolchain: 1.93.1
           override: true
 
       - run: cargo build

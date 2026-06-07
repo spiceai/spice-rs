@@ -395,8 +395,12 @@ pub(crate) struct QueryHttpClient {
 
 impl QueryHttpClient {
     pub fn new(base_url: &str, api_key: Option<String>) -> Self {
+        Self::with_client(reqwest::Client::new(), base_url, api_key)
+    }
+
+    pub fn with_client(client: reqwest::Client, base_url: &str, api_key: Option<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client,
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key,
         }

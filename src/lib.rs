@@ -6,7 +6,7 @@ mod dataset;
 mod flight;
 mod params;
 pub mod query;
-mod tls;
+pub mod tls;
 mod util;
 
 pub use arrow;
