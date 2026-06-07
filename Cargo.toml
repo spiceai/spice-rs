@@ -5,6 +5,12 @@ edition = "2024"
 rust-version = "1.93.1"
 description = "SDK for Spice.ai, an open-source runtime and platform for building AI-driven software."
 license = "Apache-2.0"
+repository = "https://github.com/spiceai/spice-rs"
+homepage = "https://spice.ai"
+documentation = "https://docs.rs/spiceai"
+readme = "README.md"
+keywords = ["spiceai", "sql", "arrow", "flight", "sdk"]
+categories = ["api-bindings", "database"]
 
 [dependencies]
 arrow = { version = "58", features = ["prettyprint"] }
@@ -39,3 +45,4 @@ winver = "1.0.0"
 
 [dev-dependencies]
 regex = "1.10.6"
+wiremock = "0.6.5"
