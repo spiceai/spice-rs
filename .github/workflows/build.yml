@@ -60,7 +60,7 @@ jobs:
         os:
           [
             ubuntu-latest,
-            ubuntu-22.04,
+            ubuntu-24.04,
             macos-latest,
             macos-14,
             windows-latest,
@@ -141,7 +141,11 @@ jobs:
 
       - name: Stop spice and check logs
         working-directory: spice_qs
-        if: "!startsWith(matrix.os, 'windows') && always()"
+        # Guard on spice_qs existing: a failed `spice install`/`spice init`
+        # never creates the working-directory, which would otherwise make this
+        # always() step error with "No such file or directory" and mask the
+        # real failure.
+        if: "always() && !startsWith(matrix.os, 'windows') && hashFiles('spice_qs/**') != ''"
         run: |
           killall spice || true
           cat spice.log
