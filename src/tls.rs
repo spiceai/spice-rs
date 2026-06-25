@@ -89,12 +89,16 @@ impl FlightChannelBuilder {
         self
     }
 
-    /// Builds and connects the Flight channel.
+    /// Builds the Flight channel.
+    ///
+    /// The channel connects lazily: no connection is opened here, only on the
+    /// first RPC. This lets an HTTP-only client be built without a reachable
+    /// Flight endpoint.
     ///
     /// # Errors
     ///
-    /// Returns an error if the TLS configuration is invalid, the
-    /// certificate files cannot be read, or the connection fails.
+    /// Returns an error if the endpoint URL is invalid, the TLS configuration
+    /// is invalid, or the certificate files cannot be read.
     pub async fn build(self) -> Result<Channel, GenericError> {
         let mut endpoint = Endpoint::from_str(&self.url)?;
 
@@ -122,7 +126,7 @@ impl FlightChannelBuilder {
             endpoint = endpoint.tls_config(tls_config)?;
         }
 
-        Ok(endpoint.connect().await?)
+        Ok(endpoint.connect_lazy())
     }
 }
 
@@ -165,17 +169,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_new_tls_flight_channel_http() {
-        // HTTP endpoint should work without TLS
+        // A valid HTTP endpoint builds a lazy channel without connecting.
         let result = new_tls_flight_channel("http://localhost:12345").await;
-        // Will fail to connect, but should not panic on TLS config
-        assert!(result.is_err()); // Connection refused is expected
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_new_tls_flight_channel_https_invalid_host() {
-        // HTTPS with invalid host should fail gracefully
+        // A syntactically valid HTTPS endpoint builds a lazy channel; the host
+        // is only resolved on the first RPC.
         let result = new_tls_flight_channel("https://invalid.nonexistent.host:443").await;
-        assert!(result.is_err());
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -198,14 +202,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_new_tls_flight_channel_unreachable_port() {
+        // Builds a lazy channel; an unreachable port only fails on the first RPC.
         let result = new_tls_flight_channel("http://127.0.0.1:1").await;
-        assert!(result.is_err());
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_new_tls_flight_channel_missing_scheme() {
+        // The authority parses, so a lazy channel is built; any scheme/connection
+        // problem surfaces on the first RPC rather than at build time.
         let result = new_tls_flight_channel("example.com:443").await;
-        assert!(result.is_err());
+        assert!(result.is_ok());
     }
 
     #[test]
