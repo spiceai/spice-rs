@@ -11,6 +11,7 @@ mod util;
 
 pub use arrow;
 pub use client::Error as SpiceClientError;
+pub use config::{SPICE_CLOUD_FLIGHT_ADDR, SPICE_LOCAL_FLIGHT_ADDR};
 pub use client::SpiceClient as Client;
 pub use client::SpiceClientBuilder as ClientBuilder;
 pub use dataset::{

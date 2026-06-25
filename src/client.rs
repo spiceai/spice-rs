@@ -3,7 +3,7 @@ use crate::params::{QueryParameterError, QueryParameters};
 use crate::query::{QueryError, QueryHttpClient, QueryJob};
 use crate::util::{FibonacciBackoffBuilder, RetryError, retry};
 use crate::{
-    config::{GenericError, SPICE_CLOUD_FLIGHT_ADDR, SPICE_LOCAL_FLIGHT_ADDR},
+    config::{GenericError, SPICE_CLOUD_FLIGHT_ADDR},
     dataset::{DatasetError, DatasetRefreshRequest, DatasetRefreshResponse},
     flight::{SqlFlightClient, is_connection_reset_generic_error},
     tls::{FlightChannelBuilder, ensure_crypto_provider, new_tls_flight_channel},
@@ -32,6 +32,11 @@ pub enum Error {
 
     #[snafu(display("Connection reset: {message}\nPlease retry the query."))]
     ConnectionReset { message: String },
+
+    #[snafu(display(
+        "Flight endpoint not configured. Use ClientBuilder::flight_url() to set it."
+    ))]
+    FlightNotConfigured,
 }
 
 struct SpiceClientConfig {
@@ -55,11 +60,15 @@ impl SpiceClientConfig {
 #[allow(clippy::module_name_repetitions)]
 #[derive(Clone)]
 pub struct SpiceClient {
-    flight: Arc<SqlFlightClient>,
+    flight: Option<Arc<SqlFlightClient>>,
     http_client: Option<Arc<QueryHttpClient>>,
 }
 
 impl SpiceClient {
+    fn flight(&self) -> Result<&Arc<SqlFlightClient>, Error> {
+        self.flight.as_ref().ok_or(Error::FlightNotConfigured)
+    }
+
     /// Creates a new `SpiceClient` with the given API key and default user agent.
     /// ```
     /// use spiceai::Client;
@@ -78,13 +87,13 @@ impl SpiceClient {
         let config = SpiceClientConfig::load_from_default().await?;
 
         Ok(Self {
-            flight: Arc::new(SqlFlightClient::new(
+            flight: Some(Arc::new(SqlFlightClient::new(
                 config.flight_channel,
                 Some(api_key.to_string()),
                 None,
                 None,
                 MAX_RETRIES,
-            )),
+            ))),
             http_client: None,
         })
     }
@@ -112,14 +121,15 @@ impl SpiceClient {
     ///
     /// - `Box<dyn Error + Send + Sync>` for any query error
     pub async fn sql(&self, query: &str) -> Result<RetryableQueryStream, Error> {
+        let flight = self.flight()?;
         let retry_strategy = FibonacciBackoffBuilder::new()
             .max_retries(Some(MAX_RETRIES as usize))
             .build();
 
         retry(retry_strategy, || async {
-            match self.flight.query(query).await {
+            match flight.query(query).await {
                 Ok(stream) => Ok(RetryableQueryStream::new(
-                    Arc::clone(&self.flight),
+                    Arc::clone(flight),
                     query,
                     None,
                     Box::pin(stream),
@@ -162,14 +172,15 @@ impl SpiceClient {
         query: &str,
         params: Option<RecordBatch>,
     ) -> Result<RetryableQueryStream, Error> {
+        let flight = self.flight()?;
         let retry_strategy = FibonacciBackoffBuilder::new()
             .max_retries(Some(MAX_RETRIES as usize))
             .build();
 
         retry(retry_strategy, || async {
-            match self.flight.query_with_params(query, params.clone()).await {
+            match flight.query_with_params(query, params.clone()).await {
                 Ok(stream) => Ok(RetryableQueryStream::new(
-                    Arc::clone(&self.flight),
+                    Arc::clone(flight),
                     query,
                     params.clone(),
                     Box::pin(stream),
@@ -620,21 +631,29 @@ impl SpiceClientBuilder {
             _ => {}
         }
 
-        let url = self
-            .flight_url
-            .as_deref()
-            .unwrap_or(SPICE_LOCAL_FLIGHT_ADDR);
-
-        let mut channel_builder = FlightChannelBuilder::new(url);
-        if let (Some(cert), Some(key)) =
-            (&self.tls_client_certificate_file, &self.tls_client_key_file)
-        {
-            channel_builder = channel_builder.with_client_certificate(cert, key);
-        }
-        if let Some(ca) = &self.tls_ca_certificate_file {
-            channel_builder = channel_builder.with_ca_certificate(ca);
-        }
-        let flight_channel = channel_builder.build().await?;
+        // Only connect Flight when a Flight endpoint is configured; an HTTP-only
+        // client (e.g. for the async /v1/queries API) never opens a Flight channel.
+        let flight = if let Some(url) = self.flight_url.as_deref() {
+            let mut channel_builder = FlightChannelBuilder::new(url);
+            if let (Some(cert), Some(key)) =
+                (&self.tls_client_certificate_file, &self.tls_client_key_file)
+            {
+                channel_builder = channel_builder.with_client_certificate(cert, key);
+            }
+            if let Some(ca) = &self.tls_ca_certificate_file {
+                channel_builder = channel_builder.with_ca_certificate(ca);
+            }
+            let flight_channel = channel_builder.build().await?;
+            Some(Arc::new(SqlFlightClient::new(
+                flight_channel,
+                self.api_key.clone(),
+                self.user_agent.clone(),
+                self.cache_control.clone(),
+                self.max_retries,
+            )))
+        } else {
+            None
+        };
 
         let http_client = if let Some(url) = self.http_url {
             let mut builder = reqwest::Client::builder();
@@ -661,13 +680,7 @@ impl SpiceClientBuilder {
         };
 
         Ok(SpiceClient {
-            flight: Arc::new(SqlFlightClient::new(
-                flight_channel,
-                self.api_key.clone(),
-                self.user_agent.clone(),
-                self.cache_control.clone(),
-                self.max_retries,
-            )),
+            flight,
             http_client,
         })
     }
@@ -690,13 +703,13 @@ mod tests {
         let flight_channel = Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
 
         SpiceClient {
-            flight: Arc::new(SqlFlightClient::new(
+            flight: Some(Arc::new(SqlFlightClient::new(
                 flight_channel,
                 None,
                 None,
                 None,
                 MAX_RETRIES,
-            )),
+            ))),
             http_client: http_base_url
                 .map(|base_url| Arc::new(QueryHttpClient::new(base_url, None))),
         }
