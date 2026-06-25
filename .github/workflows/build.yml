@@ -69,6 +69,13 @@ jobs:
         toolchain:
           - 1.93.1
           - beta
+        exclude:
+          # macOS install step is flaky and macOS + beta is the least-valuable
+          # matrix cell; skip it rather than chase the flake.
+          - os: macos-latest
+            toolchain: beta
+          - os: macos-14
+            toolchain: beta
     steps:
       # actions/checkout v4.2.2
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
