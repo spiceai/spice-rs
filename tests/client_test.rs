@@ -33,6 +33,7 @@ mod tests {
 
     async fn new_local_client() -> Client {
         ClientBuilder::new()
+            .flight_url(spiceai::SPICE_LOCAL_FLIGHT_ADDR)
             .build()
             .await
             .expect("Failed to create client")
