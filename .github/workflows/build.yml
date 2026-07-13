@@ -12,6 +12,23 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      # actions/checkout v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Install Rust toolchain
+        # dtolnay/rust-toolchain (pinned 2026-06-30)
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
+        with:
+          toolchain: 1.93.1
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
   build_toolchains:
     name: Clippy on ${{ matrix.toolchain }}
     runs-on: ubuntu-latest
@@ -97,9 +114,21 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          curl https://install.spiceai.org | /bin/bash
-          echo "$HOME/.spice/bin" >> $GITHUB_PATH
-          $HOME/.spice/bin/spice install
+          # install.spiceai.org proxies a GitHub-hosted script and can return an
+          # HTTP 429 (rate-limit) page; without -f, `curl | bash` pipes that page
+          # into bash and fails the job. Use -f + pipefail so a bad response is a
+          # real error, and retry the rate-limitable network steps.
+          set -o pipefail
+          for i in 1 2 3; do
+            curl -fsSL https://install.spiceai.org | /bin/bash && break
+            echo "spice installer attempt $i failed (likely GitHub 429); retrying in 15s"
+            [ "$i" = 3 ] && exit 1
+            sleep 15
+          done
+          echo "$HOME/.spice/bin" >> "$GITHUB_PATH"
+          "$HOME/.spice/bin/spice" install \
+            || { sleep 15 && "$HOME/.spice/bin/spice" install; } \
+            || { sleep 15 && "$HOME/.spice/bin/spice" install; }
 
       - name: Install Spice (https://install.spiceai.org) (MacOS)
         if: startsWith(matrix.os, 'macos')

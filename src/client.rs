@@ -992,14 +992,12 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/v1/queries"))
             .and(body_json(json!({ "sql": "SELECT 1" })))
-            .respond_with(
-                ResponseTemplate::new(202).set_body_json(json!({
-                    "query_id": query_id,
-                    "status": "PENDING",
-                    "status_url": format!("{}/v1/queries/{query_id}/status", server.uri()),
-                    "results_url": format!("{}/v1/queries/{query_id}/results", server.uri())
-                })),
-            )
+            .respond_with(ResponseTemplate::new(202).set_body_json(json!({
+                "query_id": query_id,
+                "status": "PENDING",
+                "status_url": format!("{}/v1/queries/{query_id}/status", server.uri()),
+                "results_url": format!("{}/v1/queries/{query_id}/results", server.uri())
+            })))
             .mount(&server)
             .await;
 
@@ -1007,19 +1005,17 @@ mod tests {
             .and(path("/v1/queries"))
             .and(query_param("status", "running"))
             .and(query_param("limit", "5"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(json!({
-                    "queries": [
-                        {
-                            "query_id": query_id,
-                            "status": "RUNNING",
-                            "created_at": "2025-01-01T00:00:00Z",
-                            "sql_preview": "SELECT 1"
-                        }
-                    ],
-                    "total_count": 1
-                })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "queries": [
+                    {
+                        "query_id": query_id,
+                        "status": "RUNNING",
+                        "created_at": "2025-01-01T00:00:00Z",
+                        "sql_preview": "SELECT 1"
+                    }
+                ],
+                "total_count": 1
+            })))
             .mount(&server)
             .await;
 
@@ -1034,10 +1030,8 @@ mod tests {
         Mock::given(method("GET"))
             .and(path(format!("/v1/queries/{query_id}")))
             .respond_with(
-                ResponseTemplate::new(200).set_body_json(query_manifest_response(
-                    query_id,
-                    QueryStatus::Succeeded,
-                )),
+                ResponseTemplate::new(200)
+                    .set_body_json(query_manifest_response(query_id, QueryStatus::Succeeded)),
             )
             .mount(&server)
             .await;
@@ -1078,7 +1072,10 @@ mod tests {
 
         let job = client.query("SELECT 1").await.expect("submit async query");
         assert_eq!(job.id(), query_id);
-        assert_eq!(job.status().await.expect("get query status"), QueryStatus::Running);
+        assert_eq!(
+            job.status().await.expect("get query status"),
+            QueryStatus::Running
+        );
 
         let info = job.info().await.expect("get query info");
         assert_eq!(info.query_id, query_id);
