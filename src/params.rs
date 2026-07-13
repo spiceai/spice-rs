@@ -18,6 +18,9 @@ pub enum QueryParameterError {
         "Query parameter arrays must contain exactly one value, got {array_length}"
     ))]
     InvalidArrayLength { array_length: usize },
+
+    #[snafu(display("{message}"))]
+    UnsupportedJsonParameter { message: String },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -59,6 +62,28 @@ impl QueryParameters {
         RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
             .map(Some)
             .map_err(|source| QueryParameterError::BatchCreation { source })
+    }
+
+    /// Encodes these parameters as the JSON array expected by the async
+    /// `/v1/queries` API, i.e. positional bind values (`$1`, `$2`, ...).
+    ///
+    /// Unlike [`into_record_batch()`](Self::into_record_batch), which produces an
+    /// Arrow batch for the Flight path, the HTTP async API accepts scalar bind
+    /// values as a JSON array. Non-scalar parameters
+    /// ([`QueryParameter::Array`]) and binary parameters have no JSON scalar
+    /// representation and return [`QueryParameterError::UnsupportedJsonParameter`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryParameterError::UnsupportedJsonParameter`] if any parameter
+    /// cannot be represented as a JSON scalar (binary, array, or non-finite float).
+    pub fn to_json_values(&self) -> Result<serde_json::Value, QueryParameterError> {
+        let values = self
+            .values
+            .iter()
+            .map(QueryParameter::to_json_value)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(serde_json::Value::Array(values))
     }
 }
 
@@ -115,6 +140,64 @@ impl QueryParameter {
     #[must_use]
     pub fn null(data_type: DataType) -> Self {
         Self::Null(data_type)
+    }
+
+    /// Converts this scalar parameter into a JSON value for the async
+    /// `/v1/queries` API. A `NULL` parameter maps to JSON `null`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryParameterError::UnsupportedJsonParameter`] for parameters
+    /// with no JSON scalar representation: binary ([`QueryParameter::Binary`],
+    /// [`QueryParameter::LargeBinary`]), arrays ([`QueryParameter::Array`]), and
+    /// non-finite floats (`NaN`/`Inf`).
+    pub fn to_json_value(&self) -> Result<serde_json::Value, QueryParameterError> {
+        use serde_json::Value;
+
+        let value = match self {
+            Self::Boolean(v) => (*v).map_or(Value::Null, Value::Bool),
+            Self::Int8(v) => (*v).map_or(Value::Null, Value::from),
+            Self::Int16(v) => (*v).map_or(Value::Null, Value::from),
+            Self::Int32(v) => (*v).map_or(Value::Null, Value::from),
+            Self::Int64(v) => (*v).map_or(Value::Null, Value::from),
+            Self::UInt8(v) => (*v).map_or(Value::Null, Value::from),
+            Self::UInt16(v) => (*v).map_or(Value::Null, Value::from),
+            Self::UInt32(v) => (*v).map_or(Value::Null, Value::from),
+            Self::UInt64(v) => (*v).map_or(Value::Null, Value::from),
+            Self::Float32(v) => match v {
+                Some(f) => Self::finite_json_number(f64::from(*f))?,
+                None => Value::Null,
+            },
+            Self::Float64(v) => match v {
+                Some(f) => Self::finite_json_number(*f)?,
+                None => Value::Null,
+            },
+            Self::Utf8(v) | Self::LargeUtf8(v) => v.clone().map_or(Value::Null, Value::String),
+            Self::Null(_) => Value::Null,
+            Self::Binary(_) | Self::LargeBinary(_) => {
+                return Err(QueryParameterError::UnsupportedJsonParameter {
+                    message: "binary parameters are not supported by the async /v1/queries API"
+                        .to_string(),
+                });
+            }
+            Self::Array(_) => {
+                return Err(QueryParameterError::UnsupportedJsonParameter {
+                    message: "array parameters are not supported by the async /v1/queries API; \
+                              use scalar bind values"
+                        .to_string(),
+                });
+            }
+        };
+
+        Ok(value)
+    }
+
+    fn finite_json_number(value: f64) -> Result<serde_json::Value, QueryParameterError> {
+        serde_json::Number::from_f64(value)
+            .map(serde_json::Value::Number)
+            .ok_or_else(|| QueryParameterError::UnsupportedJsonParameter {
+                message: format!("non-finite float parameter ({value}) cannot be encoded as JSON"),
+            })
     }
 
     pub fn array<A>(array: A) -> Result<Self, QueryParameterError>
@@ -396,6 +479,66 @@ mod tests {
     };
     use arrow::datatypes::{IntervalUnit, TimeUnit, UnionFields, UnionMode};
     use std::sync::Arc;
+
+    #[test]
+    fn to_json_values_encodes_scalars() {
+        let params = QueryParameters::new()
+            .push("active")
+            .push(5_i64)
+            .push(1.5_f64)
+            .push(true);
+        assert_eq!(
+            params.to_json_values().expect("scalars encode"),
+            serde_json::json!(["active", 5, 1.5, true])
+        );
+    }
+
+    #[test]
+    fn to_json_values_encodes_null_binding() {
+        let params = QueryParameters::new().push(None::<i32>);
+        assert_eq!(
+            params.to_json_values().expect("null encodes"),
+            serde_json::json!([null])
+        );
+    }
+
+    #[test]
+    fn to_json_values_empty_is_empty_array() {
+        assert_eq!(
+            QueryParameters::new()
+                .to_json_values()
+                .expect("empty encodes"),
+            serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn to_json_values_rejects_binary() {
+        let params = QueryParameters::new().push(vec![1_u8, 2, 3]);
+        assert!(matches!(
+            params.to_json_values(),
+            Err(QueryParameterError::UnsupportedJsonParameter { .. })
+        ));
+    }
+
+    #[test]
+    fn to_json_values_rejects_array() {
+        let array =
+            QueryParameter::array(Int32Array::from(vec![1])).expect("single-element array param");
+        assert!(matches!(
+            QueryParameters::from(array).to_json_values(),
+            Err(QueryParameterError::UnsupportedJsonParameter { .. })
+        ));
+    }
+
+    #[test]
+    fn to_json_values_rejects_non_finite_float() {
+        let params = QueryParameters::new().push(f64::NAN);
+        assert!(matches!(
+            params.to_json_values(),
+            Err(QueryParameterError::UnsupportedJsonParameter { .. })
+        ));
+    }
 
     fn batch_from(params: QueryParameters) -> RecordBatch {
         params

@@ -19,7 +19,7 @@ pub use dataset::{
 pub use params::{QueryParameter, QueryParameterError, QueryParameters};
 pub use query::{
     QueryError, QueryInfo, QueryJob, QueryListResponse, QueryResult, QueryResultStream,
-    QueryStatus, QuerySummary,
+    QueryStatus, QuerySubmitOptions, QuerySummary,
 };
 
 // Further public exports and integrations
