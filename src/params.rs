@@ -1,7 +1,7 @@
 use arrow::array::{
-    Array, ArrayRef, BinaryArray, BooleanArray, Float32Array, Float64Array, Int8Array,
-    Int16Array, Int32Array, Int64Array, LargeBinaryArray, LargeStringArray, StringArray,
-    UInt8Array, UInt16Array, UInt32Array, UInt64Array, new_null_array,
+    Array, ArrayRef, BinaryArray, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array,
+    Int32Array, Int64Array, LargeBinaryArray, LargeStringArray, StringArray, UInt8Array,
+    UInt16Array, UInt32Array, UInt64Array, new_null_array,
 };
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::error::ArrowError;
@@ -14,9 +14,7 @@ pub enum QueryParameterError {
     #[snafu(display("Failed to construct query parameter batch: {source}"))]
     BatchCreation { source: ArrowError },
 
-    #[snafu(display(
-        "Query parameter arrays must contain exactly one value, got {array_length}"
-    ))]
+    #[snafu(display("Query parameter arrays must contain exactly one value, got {array_length}"))]
     InvalidArrayLength { array_length: usize },
 }
 
@@ -570,14 +568,17 @@ mod tests {
             assert_eq!(field.data_type(), data_type);
         }
 
-        assert!(batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<BooleanArray>()
-            .expect("$1 should be Boolean")
-            .value(0));
+        assert!(
+            batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .expect("$1 should be Boolean")
+                .value(0)
+        );
         assert_eq!(
-            batch.column(1)
+            batch
+                .column(1)
                 .as_any()
                 .downcast_ref::<Int8Array>()
                 .expect("$2 should be Int8")
@@ -585,7 +586,8 @@ mod tests {
             -8
         );
         assert_eq!(
-            batch.column(2)
+            batch
+                .column(2)
                 .as_any()
                 .downcast_ref::<Int16Array>()
                 .expect("$3 should be Int16")
@@ -593,7 +595,8 @@ mod tests {
             -16
         );
         assert_eq!(
-            batch.column(3)
+            batch
+                .column(3)
                 .as_any()
                 .downcast_ref::<Int32Array>()
                 .expect("$4 should be Int32")
@@ -601,7 +604,8 @@ mod tests {
             -32
         );
         assert_eq!(
-            batch.column(4)
+            batch
+                .column(4)
                 .as_any()
                 .downcast_ref::<Int64Array>()
                 .expect("$5 should be Int64")
@@ -609,7 +613,8 @@ mod tests {
             -64
         );
         assert_eq!(
-            batch.column(5)
+            batch
+                .column(5)
                 .as_any()
                 .downcast_ref::<UInt8Array>()
                 .expect("$6 should be UInt8")
@@ -617,7 +622,8 @@ mod tests {
             8
         );
         assert_eq!(
-            batch.column(6)
+            batch
+                .column(6)
                 .as_any()
                 .downcast_ref::<UInt16Array>()
                 .expect("$7 should be UInt16")
@@ -625,7 +631,8 @@ mod tests {
             16
         );
         assert_eq!(
-            batch.column(7)
+            batch
+                .column(7)
                 .as_any()
                 .downcast_ref::<UInt32Array>()
                 .expect("$8 should be UInt32")
@@ -633,7 +640,8 @@ mod tests {
             32
         );
         assert_eq!(
-            batch.column(8)
+            batch
+                .column(8)
                 .as_any()
                 .downcast_ref::<UInt64Array>()
                 .expect("$9 should be UInt64")
@@ -641,7 +649,8 @@ mod tests {
             64
         );
         assert_eq!(
-            batch.column(9)
+            batch
+                .column(9)
                 .as_any()
                 .downcast_ref::<Float32Array>()
                 .expect("$10 should be Float32")
@@ -649,7 +658,8 @@ mod tests {
             3.25
         );
         assert_eq!(
-            batch.column(10)
+            batch
+                .column(10)
                 .as_any()
                 .downcast_ref::<Float64Array>()
                 .expect("$11 should be Float64")
@@ -657,7 +667,8 @@ mod tests {
             6.5
         );
         assert_eq!(
-            batch.column(11)
+            batch
+                .column(11)
                 .as_any()
                 .downcast_ref::<StringArray>()
                 .expect("$12 should be Utf8")
@@ -665,7 +676,8 @@ mod tests {
             "utf8-owned"
         );
         assert_eq!(
-            batch.column(12)
+            batch
+                .column(12)
                 .as_any()
                 .downcast_ref::<LargeStringArray>()
                 .expect("$13 should be LargeUtf8")
@@ -673,7 +685,8 @@ mod tests {
             "large-utf8"
         );
         assert_eq!(
-            batch.column(13)
+            batch
+                .column(13)
                 .as_any()
                 .downcast_ref::<BinaryArray>()
                 .expect("$14 should be Binary")
@@ -681,7 +694,8 @@ mod tests {
             &[1_u8, 2, 3]
         );
         assert_eq!(
-            batch.column(14)
+            batch
+                .column(14)
                 .as_any()
                 .downcast_ref::<LargeBinaryArray>()
                 .expect("$15 should be LargeBinary")
@@ -695,32 +709,43 @@ mod tests {
         let decimal = Decimal128Array::from(vec![Some(12_345_i128)])
             .with_precision_and_scale(5, 2)
             .expect("decimal array should accept precision and scale");
-        let timestamp = TimestampNanosecondArray::from(vec![Some(1_234_567_890_i64)])
-            .with_timezone_utc();
+        let timestamp =
+            TimestampNanosecondArray::from(vec![Some(1_234_567_890_i64)]).with_timezone_utc();
         let date = Date32Array::from(vec![Some(19_000)]);
         let date64 = Date64Array::from(vec![Some(1_728_000_000_i64)]);
 
         let batch = batch_from(
             QueryParameters::new()
-                .push(QueryParameter::array(StringViewArray::from(vec![Some("view-value")]))
-                    .expect("StringView parameter should be valid"))
-                .push(QueryParameter::array(BinaryViewArray::from(vec![Some(b"view-bytes".as_slice())]))
-                    .expect("BinaryView parameter should be valid"))
+                .push(
+                    QueryParameter::array(StringViewArray::from(vec![Some("view-value")]))
+                        .expect("StringView parameter should be valid"),
+                )
+                .push(
+                    QueryParameter::array(BinaryViewArray::from(vec![Some(
+                        b"view-bytes".as_slice(),
+                    )]))
+                    .expect("BinaryView parameter should be valid"),
+                )
                 .push(QueryParameter::array(decimal).expect("Decimal parameter should be valid"))
-                .push(QueryParameter::array(timestamp).expect("Timestamp parameter should be valid"))
+                .push(
+                    QueryParameter::array(timestamp).expect("Timestamp parameter should be valid"),
+                )
                 .push(QueryParameter::array(date).expect("Date32 parameter should be valid"))
                 .push(QueryParameter::array(date64).expect("Date64 parameter should be valid"))
                 .push(
-                    QueryParameter::array(
-                        Int32DictionaryArray::from_iter(vec![Some("dictionary-value")]),
-                    )
+                    QueryParameter::array(Int32DictionaryArray::from_iter(vec![Some(
+                        "dictionary-value",
+                    )]))
                     .expect("Dictionary parameter should be valid"),
                 ),
         );
 
         assert_eq!(batch.schema().field(0).data_type(), &DataType::Utf8View);
         assert_eq!(batch.schema().field(1).data_type(), &DataType::BinaryView);
-        assert_eq!(batch.schema().field(2).data_type(), &DataType::Decimal128(5, 2));
+        assert_eq!(
+            batch.schema().field(2).data_type(),
+            &DataType::Decimal128(5, 2)
+        );
         assert_eq!(
             batch.schema().field(3).data_type(),
             &DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into()))
@@ -733,7 +758,8 @@ mod tests {
         );
 
         assert_eq!(
-            batch.column(0)
+            batch
+                .column(0)
                 .as_any()
                 .downcast_ref::<StringViewArray>()
                 .expect("$1 should be Utf8View")
@@ -741,7 +767,8 @@ mod tests {
             "view-value"
         );
         assert_eq!(
-            batch.column(1)
+            batch
+                .column(1)
                 .as_any()
                 .downcast_ref::<BinaryViewArray>()
                 .expect("$2 should be BinaryView")
@@ -749,7 +776,8 @@ mod tests {
             b"view-bytes"
         );
         assert_eq!(
-            batch.column(2)
+            batch
+                .column(2)
                 .as_any()
                 .downcast_ref::<Decimal128Array>()
                 .expect("$3 should be Decimal128")
@@ -757,7 +785,8 @@ mod tests {
             12_345_i128
         );
         assert_eq!(
-            batch.column(3)
+            batch
+                .column(3)
                 .as_any()
                 .downcast_ref::<TimestampNanosecondArray>()
                 .expect("$4 should be TimestampNanosecond")
@@ -765,7 +794,8 @@ mod tests {
             1_234_567_890_i64
         );
         assert_eq!(
-            batch.column(4)
+            batch
+                .column(4)
                 .as_any()
                 .downcast_ref::<Date32Array>()
                 .expect("$5 should be Date32")
@@ -773,7 +803,8 @@ mod tests {
             19_000
         );
         assert_eq!(
-            batch.column(5)
+            batch
+                .column(5)
                 .as_any()
                 .downcast_ref::<Date64Array>()
                 .expect("$6 should be Date64")
@@ -798,8 +829,7 @@ mod tests {
     fn test_query_parameter_array_backed_nulls_cover_entire_arrow_type_set() {
         for data_type in full_arrow_data_types() {
             let batch = batch_from(QueryParameters::from(array_parameter(new_null_array(
-                &data_type,
-                1,
+                &data_type, 1,
             ))));
 
             assert_eq!(batch.num_rows(), 1);
@@ -819,9 +849,10 @@ mod tests {
             QueryParameterError::InvalidArrayLength { array_length: 2 }
         ));
 
-        let err = QueryParameters::from(QueryParameter::Array(
-            Arc::new(StringArray::from(vec![Some("one"), Some("two")])) as ArrayRef,
-        ))
+        let err = QueryParameters::from(QueryParameter::Array(Arc::new(StringArray::from(vec![
+            Some("one"),
+            Some("two"),
+        ])) as ArrayRef))
         .into_record_batch()
         .expect_err("direct array variant should also reject multi-value arrays");
         assert!(matches!(
@@ -853,15 +884,18 @@ mod tests {
                 .push(Some(vec![9_u8, 8, 7])),
         );
 
-        assert!(!batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<BooleanArray>()
-            .expect("$1 should be Boolean")
-            .value(0));
+        assert!(
+            !batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .expect("$1 should be Boolean")
+                .value(0)
+        );
         assert!(batch.column(1).is_null(0));
         assert_eq!(
-            batch.column(2)
+            batch
+                .column(2)
                 .as_any()
                 .downcast_ref::<Int16Array>()
                 .expect("$3 should be Int16")
@@ -870,7 +904,8 @@ mod tests {
         );
         assert!(batch.column(3).is_null(0));
         assert_eq!(
-            batch.column(4)
+            batch
+                .column(4)
                 .as_any()
                 .downcast_ref::<Int64Array>()
                 .expect("$5 should be Int64")
@@ -879,7 +914,8 @@ mod tests {
         );
         assert!(batch.column(5).is_null(0));
         assert_eq!(
-            batch.column(6)
+            batch
+                .column(6)
                 .as_any()
                 .downcast_ref::<UInt16Array>()
                 .expect("$7 should be UInt16")
@@ -888,7 +924,8 @@ mod tests {
         );
         assert!(batch.column(7).is_null(0));
         assert_eq!(
-            batch.column(8)
+            batch
+                .column(8)
                 .as_any()
                 .downcast_ref::<UInt64Array>()
                 .expect("$9 should be UInt64")
@@ -897,7 +934,8 @@ mod tests {
         );
         assert!(batch.column(9).is_null(0));
         assert_eq!(
-            batch.column(10)
+            batch
+                .column(10)
                 .as_any()
                 .downcast_ref::<Float64Array>()
                 .expect("$11 should be Float64")
@@ -905,7 +943,8 @@ mod tests {
             6.5
         );
         assert_eq!(
-            batch.column(11)
+            batch
+                .column(11)
                 .as_any()
                 .downcast_ref::<StringArray>()
                 .expect("$12 should be Utf8")
@@ -913,7 +952,8 @@ mod tests {
             "borrowed-str"
         );
         assert_eq!(
-            batch.column(12)
+            batch
+                .column(12)
                 .as_any()
                 .downcast_ref::<StringArray>()
                 .expect("$13 should be Utf8")
@@ -921,7 +961,8 @@ mod tests {
             "owned-option"
         );
         assert_eq!(
-            batch.column(13)
+            batch
+                .column(13)
                 .as_any()
                 .downcast_ref::<BinaryArray>()
                 .expect("$14 should be Binary")
@@ -929,7 +970,8 @@ mod tests {
             borrowed_bytes
         );
         assert_eq!(
-            batch.column(14)
+            batch
+                .column(14)
                 .as_any()
                 .downcast_ref::<BinaryArray>()
                 .expect("$15 should be Binary")

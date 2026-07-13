@@ -12,6 +12,23 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      # actions/checkout v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Install Rust toolchain
+        # dtolnay/rust-toolchain (pinned 2026-06-30)
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
+        with:
+          toolchain: 1.93.1
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
   build_toolchains:
     name: Clippy on ${{ matrix.toolchain }}
     runs-on: ubuntu-latest
