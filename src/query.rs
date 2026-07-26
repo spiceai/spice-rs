@@ -34,6 +34,7 @@
 //! ```
 
 use crate::dataset::{DatasetError, DatasetRefreshRequest, DatasetRefreshResponse};
+use crate::params::{QueryParameterError, QueryParameters};
 use arrow::array::RecordBatch;
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use futures::Stream;
@@ -109,6 +110,65 @@ pub enum QueryError {
     /// Failed to deserialize Arrow data from server response.
     #[snafu(display("Failed to deserialize Arrow data: {message}"))]
     ArrowError { message: String },
+
+    /// A bind parameter could not be encoded for the async `/v1/queries` API.
+    #[snafu(display("Invalid query parameter: {source}"))]
+    InvalidParameter {
+        /// The underlying parameter conversion error.
+        source: QueryParameterError,
+    },
+}
+
+/// Options for submitting an async query via
+/// [`SpiceClient::query_with_options`](crate::Client::query_with_options).
+///
+/// Construct with [`QuerySubmitOptions::new`] and chain the builder methods.
+/// Unset fields are omitted from the request, letting the server apply its
+/// defaults.
+///
+/// ```
+/// use spiceai::{QueryParameters, QuerySubmitOptions};
+///
+/// let options = QuerySubmitOptions::new()
+///     .bindings(QueryParameters::new().push("active"))
+///     .timeout_seconds(300)
+///     .maximum_size(100_000_000);
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct QuerySubmitOptions {
+    pub(crate) bindings: Option<QueryParameters>,
+    pub(crate) timeout_seconds: Option<u64>,
+    pub(crate) maximum_size: Option<u64>,
+}
+
+impl QuerySubmitOptions {
+    /// Creates an empty set of submit options.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets positional scalar bind parameters (`$1`, `$2`, ...) for the query.
+    #[must_use]
+    pub fn bindings(mut self, params: impl Into<QueryParameters>) -> Self {
+        self.bindings = Some(params.into());
+        self
+    }
+
+    /// Sets the maximum execution time, in seconds, before the server aborts
+    /// the query.
+    #[must_use]
+    pub fn timeout_seconds(mut self, seconds: u64) -> Self {
+        self.timeout_seconds = Some(seconds);
+        self
+    }
+
+    /// Sets the maximum materialized result size, in bytes.
+    #[must_use]
+    pub fn maximum_size(mut self, bytes: u64) -> Self {
+        self.maximum_size = Some(bytes);
+        self
+    }
 }
 
 /// The current status of an async query.
@@ -413,13 +473,19 @@ impl QueryHttpClient {
         }
     }
 
-    pub async fn submit(&self, sql: &str) -> Result<SubmitResponse, QueryError> {
+    pub async fn submit(
+        &self,
+        sql: &str,
+        parameters: Option<serde_json::Value>,
+        timeout_seconds: Option<u64>,
+        maximum_size: Option<u64>,
+    ) -> Result<SubmitResponse, QueryError> {
         let url = format!("{}/v1/queries", self.base_url);
         let body = SubmitRequest {
             sql: sql.to_string(),
-            parameters: None,
-            timeout_seconds: None,
-            maximum_size: None,
+            parameters,
+            timeout_seconds,
+            maximum_size,
         };
 
         let response = self

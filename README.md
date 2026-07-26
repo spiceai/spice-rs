@@ -140,6 +140,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 ```
 
+Async queries also accept positional bindings (`$1`, `$2`, ...) and submit options. Use `query_with_bindings` for the common parameterized case, or `query_with_options` to also set an execution `timeout_seconds` or a `maximum_size` cap on the materialized result.
+
+```rust,no_run
+use spiceai::{ClientBuilder, QueryParameters, QuerySubmitOptions};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+  let client = ClientBuilder::new()
+    .http_url("http://localhost:8090")
+    .build()
+    .await?;
+
+  let job = client
+    .query_with_options(
+      "SELECT * FROM large_table WHERE status = $1 AND created_at > $2",
+      QuerySubmitOptions::new()
+        .bindings(QueryParameters::new().push("active").push("2025-01-01"))
+        .timeout_seconds(300)
+        .maximum_size(100_000_000),
+    )
+    .await?;
+
+  let result = job.wait().await?;
+  println!("completed with {} rows", result.total_rows);
+  Ok(())
+}
+```
+
 ## Documentation
 
 Check out our [Documentation](https://docs.spice.ai/sdks/rust-sdk) to learn more about how to use the Rust SDK.
