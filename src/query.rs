@@ -691,6 +691,37 @@ impl QueryHttpClient {
         }
     }
 
+    pub async fn search(
+        &self,
+        request: &crate::search::SearchRequest,
+    ) -> Result<crate::search::SearchResponse, crate::search::SearchError> {
+        use crate::search::SearchError;
+
+        let url = format!("{}/v1/search", self.base_url);
+
+        let response = self
+            .add_auth(self.client.post(&url))
+            .json(request)
+            .send()
+            .await
+            .map_err(|e| SearchError::HttpError {
+                message: e.to_string(),
+            })?;
+
+        match response.status().as_u16() {
+            200 => response.json().await.map_err(|e| SearchError::ParseError {
+                message: e.to_string(),
+            }),
+            status_code => {
+                let response_body = response.text().await.unwrap_or_default();
+                Err(SearchError::SearchFailed {
+                    status_code,
+                    response_body,
+                })
+            }
+        }
+    }
+
     pub async fn refresh_dataset(
         &self,
         dataset_name: &str,

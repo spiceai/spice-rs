@@ -111,6 +111,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 ```
 
+### Search
+
+`search()` runs vector similarity, keyword, and hybrid search against datasets that have an embedding column and a loaded embedding model. Like dataset refresh, it uses the Spice HTTP API, so configure `http_url()`.
+
+```rust,no_run
+use spiceai::{ClientBuilder, SearchRequest};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+  let client = ClientBuilder::new()
+    .http_url("http://localhost:8090")
+    .build()
+    .await?;
+
+  let response = client
+    .search(
+      SearchRequest::new("tickets to Tokyo")
+        .with_datasets(["app_messages"])
+        .with_limit(3),
+    )
+    .await?;
+
+  println!("{} matches in {}ms", response.len(), response.duration_ms);
+  for m in &response {
+    println!("{} {} {:?}", m.dataset, m.score, m.matches);
+  }
+  Ok(())
+}
+```
+
+Only the query text is required. `with_datasets` restricts the search — omit it to search every dataset with an embedding column. `with_limit` caps matches per dataset, `with_where` applies an SQL predicate before the search, and `with_additional_columns` names extra columns to return. `with_keywords` pre-filters the embedding column with a lexical search before the vector search runs, making the search hybrid:
+
+```rust,no_run
+use spiceai::SearchRequest;
+
+let request = SearchRequest::new("tickets to Tokyo")
+  .with_where("city = 'Tokyo'")
+  .with_additional_columns(["timestamp"])
+  .with_keywords(["plane", "tickets"]);
+```
+
+Each `SearchMatch` carries the `dataset` it was found in, its similarity `score`, the matched column values in `matches`, the row's `primary_key`, the columns requested via `with_additional_columns` in `data`, and any `metadata`. The runtime omits the last four when empty; they deserialize to empty maps, so they can be read without a guard.
+
 ### Async query jobs and dataset refresh
 
 Async query management and dataset refresh use the Spice HTTP API, so configure `http_url()` in addition to the Flight endpoint when needed.

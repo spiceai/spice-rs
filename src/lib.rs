@@ -6,6 +6,7 @@ mod dataset;
 mod flight;
 mod params;
 pub mod query;
+mod search;
 pub mod tls;
 mod util;
 
@@ -21,6 +22,7 @@ pub use query::{
     QueryError, QueryInfo, QueryJob, QueryListResponse, QueryResult, QueryResultStream,
     QueryStatus, QuerySubmitOptions, QuerySummary,
 };
+pub use search::{SearchError, SearchMatch, SearchRequest, SearchResponse};
 
 // Further public exports and integrations
 pub use futures::StreamExt;
