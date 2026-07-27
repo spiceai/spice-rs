@@ -1,6 +1,6 @@
 use crate::flight::RetryableQueryStream;
 use crate::params::{QueryParameterError, QueryParameters};
-use crate::query::{QueryError, QueryHttpClient, QueryJob};
+use crate::query::{QueryError, QueryHttpClient, QueryJob, QuerySubmitOptions};
 use crate::util::{FibonacciBackoffBuilder, RetryError, retry};
 use crate::{
     config::{GenericError, SPICE_CLOUD_FLIGHT_ADDR, SPICE_LOCAL_FLIGHT_ADDR},
@@ -275,7 +275,125 @@ impl SpiceClient {
                 .to_string(),
         })?;
 
-        let response = http_client.submit(sql).await?;
+        let response = http_client.submit(sql, None, None, None).await?;
+        Ok(QueryJob::new(response.query_id, Arc::clone(http_client)))
+    }
+
+    /// Submits an async parameterized SQL query using scalar bindings.
+    ///
+    /// This is the async (`/v1/queries`) counterpart to
+    /// [`sql_with_bindings()`](Self::sql_with_bindings): it binds a single row of
+    /// positional scalar values (`$1`, `$2`, ...) and returns a [`QueryJob`]
+    /// handle. To also set a timeout or result-size cap, use
+    /// [`query_with_options()`](Self::query_with_options).
+    ///
+    /// **Note:** Requires [`http_url()`](SpiceClientBuilder::http_url) to be configured.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use spiceai::{ClientBuilder, QueryParameters};
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    /// let client = ClientBuilder::new()
+    ///     .http_url("http://localhost:8090")
+    ///     .build()
+    ///     .await?;
+    ///
+    /// let job = client
+    ///     .query_with_bindings(
+    ///         "SELECT * FROM large_table WHERE status = $1",
+    ///         QueryParameters::new().push("active"),
+    ///     )
+    ///     .await?;
+    /// println!("Query submitted: {}", job.id());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// - [`QueryError::InvalidParameter`] if a binding cannot be encoded as JSON
+    /// - [`QueryError::ClusterModeRequired`] if async queries are not enabled
+    /// - [`QueryError::SubmitFailed`] if the query submission fails
+    /// - [`QueryError::HttpError`] if the HTTP endpoint is not configured or unreachable
+    pub async fn query_with_bindings(
+        &self,
+        sql: &str,
+        params: QueryParameters,
+    ) -> Result<QueryJob, QueryError> {
+        self.query_with_options(sql, QuerySubmitOptions::new().bindings(params))
+            .await
+    }
+
+    /// Submits an async SQL query with explicit submit options.
+    ///
+    /// [`QuerySubmitOptions`] carries the optional bind parameters, a server-side
+    /// execution `timeout_seconds`, and a `maximum_size` cap on the materialized
+    /// result. Any option left unset is omitted from the request so the server
+    /// applies its default.
+    ///
+    /// **Note:** Requires [`http_url()`](SpiceClientBuilder::http_url) to be configured.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use spiceai::{ClientBuilder, QueryParameters, QuerySubmitOptions};
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    /// let client = ClientBuilder::new()
+    ///     .http_url("http://localhost:8090")
+    ///     .build()
+    ///     .await?;
+    ///
+    /// let job = client
+    ///     .query_with_options(
+    ///         "SELECT * FROM large_table WHERE status = $1",
+    ///         QuerySubmitOptions::new()
+    ///             .bindings(QueryParameters::new().push("active"))
+    ///             .timeout_seconds(300)
+    ///             .maximum_size(100_000_000),
+    ///     )
+    ///     .await?;
+    /// let result = job.wait().await?;
+    /// println!("Completed with {} rows", result.total_rows);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// - [`QueryError::InvalidParameter`] if a binding cannot be encoded as JSON
+    /// - [`QueryError::ClusterModeRequired`] if async queries are not enabled
+    /// - [`QueryError::SubmitFailed`] if the query submission fails
+    /// - [`QueryError::HttpError`] if the HTTP endpoint is not configured or unreachable
+    pub async fn query_with_options(
+        &self,
+        sql: &str,
+        options: QuerySubmitOptions,
+    ) -> Result<QueryJob, QueryError> {
+        let http_client = self.http_client.as_ref().ok_or(QueryError::HttpError {
+            message: "HTTP endpoint not configured. Use ClientBuilder::http_url() to set it."
+                .to_string(),
+        })?;
+
+        let parameters = match &options.bindings {
+            Some(params) if !params.is_empty() => Some(
+                params
+                    .to_json_values()
+                    .map_err(|source| QueryError::InvalidParameter { source })?,
+            ),
+            _ => None,
+        };
+
+        let response = http_client
+            .submit(
+                sql,
+                parameters,
+                options.timeout_seconds,
+                options.maximum_size,
+            )
+            .await?;
         Ok(QueryJob::new(response.query_id, Arc::clone(http_client)))
     }
 
@@ -1030,6 +1148,83 @@ mod tests {
                 .await,
             Err(DatasetError::HttpError { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn test_query_with_bindings_submits_parameters() {
+        let server = MockServer::start().await;
+        let query_id = "qry_params";
+        let sql = "SELECT * FROM t WHERE status = $1 AND n > $2";
+
+        Mock::given(method("POST"))
+            .and(path("/v1/queries"))
+            .and(body_json(
+                json!({ "sql": sql, "parameters": ["active", 5] }),
+            ))
+            .respond_with(ResponseTemplate::new(202).set_body_json(json!({
+                "query_id": query_id,
+                "status": "PENDING",
+                "status_url": format!("{}/v1/queries/{query_id}/status", server.uri()),
+                "results_url": format!("{}/v1/queries/{query_id}/results", server.uri())
+            })))
+            .mount(&server)
+            .await;
+
+        let client = test_client(Some(&server.uri()));
+        let job = client
+            .query_with_bindings(sql, QueryParameters::new().push("active").push(5_i64))
+            .await
+            .expect("submit parameterized async query");
+        assert_eq!(job.id(), query_id);
+    }
+
+    #[tokio::test]
+    async fn test_query_with_options_submits_all_fields() {
+        let server = MockServer::start().await;
+        let query_id = "qry_opts";
+        let sql = "SELECT * FROM t WHERE status = $1";
+
+        Mock::given(method("POST"))
+            .and(path("/v1/queries"))
+            .and(body_json(json!({
+                "sql": sql,
+                "parameters": ["active"],
+                "timeout_seconds": 300,
+                "maximum_size": 100_000_000
+            })))
+            .respond_with(ResponseTemplate::new(202).set_body_json(json!({
+                "query_id": query_id,
+                "status": "PENDING",
+                "status_url": format!("{}/v1/queries/{query_id}/status", server.uri()),
+                "results_url": format!("{}/v1/queries/{query_id}/results", server.uri())
+            })))
+            .mount(&server)
+            .await;
+
+        let client = test_client(Some(&server.uri()));
+        let job = client
+            .query_with_options(
+                sql,
+                QuerySubmitOptions::new()
+                    .bindings(QueryParameters::new().push("active"))
+                    .timeout_seconds(300)
+                    .maximum_size(100_000_000),
+            )
+            .await
+            .expect("submit async query with options");
+        assert_eq!(job.id(), query_id);
+    }
+
+    #[tokio::test]
+    async fn test_query_with_bindings_rejects_unsupported_param() {
+        // A binary bind value has no JSON scalar form; the client must reject it
+        // locally, before any HTTP request is attempted.
+        let client = test_client(Some("http://127.0.0.1:1"));
+        let err = client
+            .query_with_bindings("SELECT $1", QueryParameters::new().push(vec![1_u8, 2, 3]))
+            .await
+            .expect_err("binary bind parameter should be rejected before submit");
+        assert!(matches!(err, QueryError::InvalidParameter { .. }));
     }
 
     #[tokio::test]
