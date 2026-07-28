@@ -20,8 +20,13 @@ pub enum StatusError {
     HttpNotConfigured,
 
     /// HTTP request failed with an error response.
-    #[snafu(display("Failed to get runtime status (HTTP {status_code}): {response_body}"))]
+    ///
+    /// Raised by both [`SpiceClient::runtime_status`] and [`SpiceClient::is_ready`],
+    /// so the message names the endpoint that failed rather than assuming either one.
+    #[snafu(display("Failed to query {url} (HTTP {status_code}): {response_body}"))]
     RequestFailed {
+        /// Endpoint that returned the error response.
+        url: String,
         /// HTTP status code returned by the server.
         status_code: u16,
         /// Response body from the server.
@@ -29,8 +34,12 @@ pub enum StatusError {
     },
 
     /// HTTP transport error.
-    #[snafu(display("Failed to get runtime status: {message}"))]
+    ///
+    /// Raised by both [`SpiceClient::runtime_status`] and [`SpiceClient::is_ready`].
+    #[snafu(display("Failed to query {url}: {message}"))]
     HttpError {
+        /// Endpoint that could not be reached.
+        url: String,
         /// Description of the transport failure.
         message: String,
     },
@@ -126,6 +135,7 @@ impl QueryHttpClient {
             .send()
             .await
             .map_err(|e| StatusError::HttpError {
+                url: url.clone(),
                 message: e.to_string(),
             })?;
 
@@ -136,6 +146,7 @@ impl QueryHttpClient {
             status_code => {
                 let response_body = response.text().await.unwrap_or_default();
                 Err(StatusError::RequestFailed {
+                    url,
                     status_code,
                     response_body,
                 })
@@ -152,6 +163,7 @@ impl QueryHttpClient {
             .send()
             .await
             .map_err(|e| StatusError::HttpError {
+                url: url.clone(),
                 message: e.to_string(),
             })?;
 
@@ -161,6 +173,7 @@ impl QueryHttpClient {
             status_code => {
                 let response_body = response.text().await.unwrap_or_default();
                 Err(StatusError::RequestFailed {
+                    url,
                     status_code,
                     response_body,
                 })
@@ -228,5 +241,29 @@ mod tests {
         assert_eq!(details[1].status, ComponentStatus::Initializing);
         assert!(!details[1].is_ready());
         assert_eq!(details[2].endpoint, "N/A");
+    }
+
+    #[test]
+    fn request_errors_name_the_endpoint_that_failed() {
+        // `RequestFailed`/`HttpError` are shared by `runtime_status` (/v1/status) and
+        // `is_ready` (/v1/ready), so the message has to say which one was being queried.
+        let request_failed = StatusError::RequestFailed {
+            url: "http://localhost:8090/v1/ready".to_string(),
+            status_code: 401,
+            response_body: "unauthorized".to_string(),
+        };
+        assert_eq!(
+            request_failed.to_string(),
+            "Failed to query http://localhost:8090/v1/ready (HTTP 401): unauthorized"
+        );
+
+        let http_error = StatusError::HttpError {
+            url: "http://localhost:8090/v1/status".to_string(),
+            message: "connection refused".to_string(),
+        };
+        assert_eq!(
+            http_error.to_string(),
+            "Failed to query http://localhost:8090/v1/status: connection refused"
+        );
     }
 }
