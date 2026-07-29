@@ -44,6 +44,11 @@ pub struct SearchRequest {
 
     /// Restricts the search to these datasets. `None` searches every dataset
     /// with an embedding column.
+    ///
+    /// `Some(vec![])` is not the same as `None`: it asks for a search over no
+    /// datasets, which the runtime rejects with "No data sources provided".
+    /// That is deliberate — a caller whose dataset list came out empty is
+    /// better served by an error than by a silent search across everything.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub datasets: Option<Vec<String>>,
 
@@ -225,6 +230,21 @@ mod tests {
                 "keywords": ["plane", "tickets"],
             })
         );
+    }
+
+    #[test]
+    fn test_empty_datasets_is_distinct_from_omitted() {
+        // An explicitly empty list asks for "no datasets", which the runtime
+        // rejects. Coercing it to None would instead silently widen the search
+        // to every dataset.
+        let omitted =
+            serde_json::to_value(SearchRequest::new("x")).expect("serialize search request");
+        assert!(omitted.get("datasets").is_none());
+
+        let empty =
+            serde_json::to_value(SearchRequest::new("x").with_datasets(Vec::<String>::new()))
+                .expect("serialize search request");
+        assert_eq!(empty.get("datasets"), Some(&serde_json::json!([])));
     }
 
     #[test]
