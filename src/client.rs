@@ -6,6 +6,7 @@ use crate::{
     config::{GenericError, SPICE_CLOUD_FLIGHT_ADDR, SPICE_LOCAL_FLIGHT_ADDR},
     dataset::{DatasetError, DatasetRefreshRequest, DatasetRefreshResponse},
     flight::{SqlFlightClient, is_connection_reset_generic_error},
+    search::{SearchError, SearchRequest, SearchResponse},
     tls::{FlightChannelBuilder, ensure_crypto_provider, new_tls_flight_channel},
 };
 use arrow::record_batch::RecordBatch;
@@ -574,6 +575,55 @@ impl SpiceClient {
         })?;
 
         http_client.refresh_dataset(dataset_name, &request).await
+    }
+
+    /// Searches datasets for documents similar to the request's text.
+    ///
+    /// Runs against datasets that have an embedding column and a loaded
+    /// embedding model — see [Search & Retrieval](https://docs.spice.ai/features/search-and-retrieval)
+    /// for how to configure them. Adding keywords to the request turns this
+    /// into a hybrid search, combining a lexical pass with the vector scores.
+    ///
+    /// **Note:** Requires [`http_url()`](SpiceClientBuilder::http_url) to be configured.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use spiceai::{ClientBuilder, SearchRequest};
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    /// let client = ClientBuilder::new()
+    ///     .http_url("http://localhost:8090")
+    ///     .build()
+    ///     .await?;
+    ///
+    /// let response = client
+    ///     .search(
+    ///         SearchRequest::new("tokyo plane tickets")
+    ///             .with_datasets(["app_messages"])
+    ///             .with_limit(3),
+    ///     )
+    ///     .await?;
+    ///
+    /// for m in response {
+    ///     println!("{} {} {:?}", m.score, m.dataset, m.matches);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// - [`SearchError::InvalidRequest`] if the request has empty text or a zero limit
+    /// - [`SearchError::HttpError`] if the HTTP endpoint is not configured or unreachable
+    /// - [`SearchError::SearchFailed`] if the runtime rejects the search
+    pub async fn search(&self, request: SearchRequest) -> Result<SearchResponse, SearchError> {
+        let http_client = self.http_client.as_ref().ok_or(SearchError::HttpError {
+            message: "HTTP endpoint not configured. Use ClientBuilder::http_url() to set it."
+                .to_string(),
+        })?;
+
+        http_client.search(&request).await
     }
 }
 
@@ -1402,5 +1452,117 @@ mod tests {
             .await
             .expect("refresh dataset with explicit overrides");
         assert_eq!(custom_refresh.message, "Refresh scheduled");
+    }
+
+    #[tokio::test]
+    async fn test_search_posts_request_and_parses_response() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/search"))
+            .and(body_json(json!({
+                "text": "tokyo plane tickets",
+                "datasets": ["app_messages"],
+                "limit": 3,
+                "additional_columns": ["timestamp"],
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [
+                    {
+                        "matches": {"message": ["I booked us some tickets", "direct to Narita"]},
+                        "dataset": "app_messages",
+                        "primary_key": {"id": "6fd5a215"},
+                        "data": {"timestamp": 1_724_716_542_i64},
+                        "_score": 0.914_321
+                    },
+                    {
+                        "matches": {"message": ["we're sitting together"]},
+                        "dataset": "app_messages",
+                        "_score": 0.787_654
+                    }
+                ],
+                "duration_ms": 42
+            })))
+            .mount(&server)
+            .await;
+
+        let client = test_client(Some(&server.uri()));
+
+        let response = client
+            .search(
+                SearchRequest::new("tokyo plane tickets")
+                    .with_datasets(["app_messages"])
+                    .with_limit(3)
+                    .with_additional_columns(["timestamp"]),
+            )
+            .await
+            .expect("search succeeds");
+
+        assert_eq!(response.duration_ms, 42);
+        assert_eq!(response.len(), 2);
+
+        let first = &response.results[0];
+        assert_eq!(first.dataset, "app_messages");
+        // One column can contribute several chunks to a single match.
+        assert_eq!(first.matches["message"].len(), 2);
+        assert_eq!(first.data["timestamp"], 1_724_716_542_i64);
+
+        // The runtime omits data and primary_key when they are empty.
+        assert!(response.results[1].data.is_empty());
+        assert!(response.results[1].primary_key.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_search_surfaces_runtime_error_body() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/search"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("No data sources provided"))
+            .mount(&server)
+            .await;
+
+        let client = test_client(Some(&server.uri()));
+
+        let err = client
+            .search(SearchRequest::new("tokyo"))
+            .await
+            .expect_err("runtime rejects the search");
+
+        let message = err.to_string();
+        assert!(message.contains("No data sources provided"), "{message}");
+        assert!(message.contains("400"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn test_search_validates_before_sending() {
+        let server = MockServer::start().await;
+        // No mock is mounted: a request reaching the server fails the test.
+        let client = test_client(Some(&server.uri()));
+
+        let err = client
+            .search(SearchRequest::new(""))
+            .await
+            .expect_err("empty text is rejected");
+        assert!(err.to_string().contains("non-empty"), "{err}");
+
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_requires_http_url() {
+        let client = test_client(None);
+
+        let err = client
+            .search(SearchRequest::new("tokyo"))
+            .await
+            .expect_err("search without an HTTP endpoint fails");
+        assert!(err.to_string().contains("http_url"), "{err}");
     }
 }

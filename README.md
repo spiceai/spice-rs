@@ -168,6 +168,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 ```
 
+### Search
+
+`search` finds documents similar to a piece of text using the runtime's `/v1/search` endpoint. It runs against datasets that have an embedding column and a loaded embedding model — see [Search & Retrieval](https://docs.spice.ai/features/search-and-retrieval) for how to configure them. Like dataset refresh, it uses the HTTP API, so `http_url()` must be configured.
+
+```rust,no_run
+use spiceai::{ClientBuilder, SearchRequest};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+  let client = ClientBuilder::new()
+    .http_url("http://localhost:8090")
+    .build()
+    .await?;
+
+  let response = client
+    .search(
+      SearchRequest::new("tokyo plane tickets")
+        .with_datasets(["app_messages"])
+        .with_limit(3)
+        .with_additional_columns(["timestamp"]),
+    )
+    .await?;
+
+  println!("{} matches in {}ms", response.len(), response.duration_ms);
+  for m in response {
+    println!("{} {} {:?}", m.score, m.dataset, m.matches);
+  }
+  Ok(())
+}
+```
+
+Adding `with_keywords([...])` runs a lexical pass alongside the vector pass, which the runtime combines into a single hybrid ranking. `with_where("user_id = 42")` filters candidate rows with a SQL predicate.
+
+Each `SearchMatch` carries `dataset`, `score` (higher is more similar), `matches` (matched values keyed by source column — a list per column, since one column can contribute several chunks to a match), `primary_key`, `data`, and `metadata`.
+
 ## Documentation
 
 Check out our [Documentation](https://docs.spice.ai/sdks/rust-sdk) to learn more about how to use the Rust SDK.

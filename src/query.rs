@@ -35,6 +35,7 @@
 
 use crate::dataset::{DatasetError, DatasetRefreshRequest, DatasetRefreshResponse};
 use crate::params::{QueryParameterError, QueryParameters};
+use crate::search::{SearchError, SearchRequest, SearchResponse};
 use arrow::array::RecordBatch;
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use futures::Stream;
@@ -756,6 +757,36 @@ impl QueryHttpClient {
                 })
             }
         }
+    }
+
+    pub async fn search(&self, request: &SearchRequest) -> Result<SearchResponse, SearchError> {
+        request.validate()?;
+
+        let url = format!("{}/v1/search", self.base_url);
+
+        let response = self
+            .add_auth(self.client.post(&url))
+            .json(request)
+            .send()
+            .await
+            .map_err(|e| SearchError::HttpError {
+                message: e.to_string(),
+            })?;
+
+        let status_code = response.status().as_u16();
+        if status_code != 200 {
+            // The runtime explains search failures in a plain-text body ("No
+            // data sources provided"). Surface it, not just the status code.
+            let response_body = response.text().await.unwrap_or_default();
+            return Err(SearchError::SearchFailed {
+                status_code,
+                response_body: response_body.trim().to_string(),
+            });
+        }
+
+        response.json().await.map_err(|e| SearchError::ParseError {
+            message: e.to_string(),
+        })
     }
 
     /// List queries with optional status filter and limit.
