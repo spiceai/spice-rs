@@ -454,8 +454,19 @@ pub(crate) struct QueryHttpClient {
 }
 
 impl QueryHttpClient {
+    /// Builds a client carrying the same-origin redirect policy, so this constructor cannot
+    /// be the one path that leaks the API key across origins (#12502).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the TLS backend cannot be initialised, which is what `reqwest::Client::new`
+    /// — the call this replaces — already did.
     pub fn new(base_url: &str, api_key: Option<String>) -> Self {
-        Self::with_client(reqwest::Client::new(), base_url, api_key)
+        let client = crate::redirect::credentialed_client_builder()
+            .build()
+            .expect("client builder should not fail");
+
+        Self::with_client(client, base_url, api_key)
     }
 
     pub fn with_client(client: reqwest::Client, base_url: &str, api_key: Option<String>) -> Self {
