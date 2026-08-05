@@ -34,11 +34,11 @@ fn is_same_origin(previous: &reqwest::Url, next: &reqwest::Url) -> bool {
 fn same_origin_redirect_policy() -> reqwest::redirect::Policy {
     reqwest::redirect::Policy::custom(|attempt| {
         // Decided up front so every borrow of `attempt` ends before it is consumed below.
-        let leaves_origin = match attempt.previous().last() {
-            // Nothing to compare against, so nothing proves this stays on origin.
-            None => true,
-            Some(previous) => !is_same_origin(previous, attempt.url()),
-        };
+        // No previous hop means nothing proves this stays on origin, hence `is_none_or`.
+        let leaves_origin = attempt
+            .previous()
+            .last()
+            .is_none_or(|previous| !is_same_origin(previous, attempt.url()));
         let too_many_hops = attempt.previous().len() > MAX_REDIRECTS;
 
         if leaves_origin || too_many_hops {
@@ -53,6 +53,7 @@ fn same_origin_redirect_policy() -> reqwest::redirect::Policy {
 ///
 /// Every HTTP client in this crate is built from here, so the policy cannot be set on one
 /// construction path and missed on another.
+#[must_use]
 pub(crate) fn credentialed_client_builder() -> reqwest::ClientBuilder {
     let policy = same_origin_redirect_policy();
     reqwest::Client::builder().redirect(policy)

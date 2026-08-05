@@ -817,8 +817,10 @@ mod tests {
                 None,
                 MAX_RETRIES,
             )),
-            http_client: http_base_url
-                .map(|base_url| Arc::new(QueryHttpClient::new(base_url, None))),
+            http_client: http_base_url.map(|base_url| {
+                let client = QueryHttpClient::new(base_url, None);
+                Arc::new(client.expect("build client"))
+            }),
         }
     }
 
