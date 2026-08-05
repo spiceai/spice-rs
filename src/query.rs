@@ -792,10 +792,17 @@ impl QueryHttpClient {
         if status_code != 200 {
             // The runtime explains search failures in a plain-text body ("No
             // data sources provided"). Surface it, not just the status code.
-            let response_body = response.text().await.unwrap_or_default();
+            let response_body = match response.text().await {
+                Ok(body) => body.trim().to_string(),
+                // The status code is already known, so a body that cannot be read
+                // reports why instead of collapsing to an empty string — otherwise
+                // the transport failure is lost and the error reads as if the
+                // runtime had explained nothing.
+                Err(e) => format!("<error body could not be read: {e}>"),
+            };
             return Err(SearchError::SearchFailed {
                 status_code,
-                response_body: response_body.trim().to_string(),
+                response_body,
             });
         }
 
