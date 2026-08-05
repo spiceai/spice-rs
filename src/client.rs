@@ -805,7 +805,9 @@ impl SpiceClientBuilder {
         let flight_channel = channel_builder.build().await?;
 
         let http_client = if let Some(url) = self.http_url {
-            let mut builder = reqwest::Client::builder();
+            // Built from the shared helper so the API key cannot follow a redirect off the
+            // origin it was configured for (#12502).
+            let mut builder = crate::redirect::credentialed_client_builder();
             if let (Some(cert_path), Some(key_path)) =
                 (&self.tls_client_certificate_file, &self.tls_client_key_file)
             {
@@ -865,8 +867,10 @@ mod tests {
                 None,
                 MAX_RETRIES,
             )),
-            http_client: http_base_url
-                .map(|base_url| Arc::new(QueryHttpClient::new(base_url, None))),
+            http_client: http_base_url.map(|base_url| {
+                let client = QueryHttpClient::new(base_url, None);
+                Arc::new(client.expect("build client"))
+            }),
         }
     }
 

@@ -455,8 +455,23 @@ pub(crate) struct QueryHttpClient {
 }
 
 impl QueryHttpClient {
-    pub fn new(base_url: &str, api_key: Option<String>) -> Self {
-        Self::with_client(reqwest::Client::new(), base_url, api_key)
+    /// Builds a client carrying the same-origin redirect policy (#12502), for tests that need
+    /// one pointed at a mock server.
+    ///
+    /// Test-only: in production the sole construction path is [`Self::with_client`], fed by
+    /// `SpiceClientBuilder::build`. Keeping it that way is what makes the policy impossible to
+    /// miss, so this is gated rather than left as an unused second door into the type.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the TLS backend cannot be initialised. The policy is the reason
+    /// this is fallible where `reqwest::Client::new` — the call it replaces — panicked: a
+    /// client built by defaulting past the failure would silently not carry it.
+    #[cfg(test)]
+    pub fn new(base_url: &str, api_key: Option<String>) -> Result<Self, reqwest::Error> {
+        let client = crate::redirect::credentialed_client_builder().build()?;
+
+        Ok(Self::with_client(client, base_url, api_key))
     }
 
     pub fn with_client(client: reqwest::Client, base_url: &str, api_key: Option<String>) -> Self {
@@ -1426,6 +1441,13 @@ mod tests {
     use futures::StreamExt;
 
     // -----------------------------------------------------------------------
+    // Helper: build a QueryHttpClient pointed at `base_url`
+    // -----------------------------------------------------------------------
+    fn test_http_client(base_url: &str) -> Arc<QueryHttpClient> {
+        Arc::new(QueryHttpClient::new(base_url, None).expect("build client"))
+    }
+
+    // -----------------------------------------------------------------------
     // Helper: build a ManifestSchemaColumn
     // -----------------------------------------------------------------------
     fn col(name: &str, type_name: &str, nullable: bool, position: usize) -> ManifestSchemaColumn {
@@ -1998,7 +2020,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[tokio::test]
     async fn test_empty_with_schema_yields_one_empty_batch() {
-        let client = Arc::new(QueryHttpClient::new("http://unused:9999", None));
+        let client = test_http_client("http://unused:9999");
         let schema = Arc::new(Schema::new(vec![
             Field::new("a", DataType::Int32, false),
             Field::new("b", DataType::Utf8, true),
@@ -2026,7 +2048,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_with_schema_complex_types() {
-        let client = Arc::new(QueryHttpClient::new("http://unused:9999", None));
+        let client = test_http_client("http://unused:9999");
         let schema = Arc::new(Schema::new(vec![
             Field::new(
                 "ts",
@@ -2054,7 +2076,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_with_schema_no_columns() {
-        let client = Arc::new(QueryHttpClient::new("http://unused:9999", None));
+        let client = test_http_client("http://unused:9999");
         let schema = Arc::new(Schema::empty());
         let mut stream = QueryResultStream::empty_with_schema(
             client,
@@ -2099,7 +2121,7 @@ mod tests {
         let meta: ManifestMetadata = serde_json::from_value(json).expect("should deserialize");
         let schema = schema_from_manifest(meta.schema.as_ref().expect("schema present"));
 
-        let client = Arc::new(QueryHttpClient::new("http://unused:9999", None));
+        let client = test_http_client("http://unused:9999");
         let mut stream =
             QueryResultStream::empty_with_schema(client, "e2e-query".to_string(), schema);
 
@@ -2153,7 +2175,7 @@ mod tests {
         let meta: ManifestMetadata = serde_json::from_value(json).expect("should deserialize");
         let schema = schema_from_manifest(meta.schema.as_ref().expect("schema present"));
 
-        let client = Arc::new(QueryHttpClient::new("http://unused:9999", None));
+        let client = test_http_client("http://unused:9999");
         let mut stream =
             QueryResultStream::empty_with_schema(client, "all-nullable".to_string(), schema);
 
