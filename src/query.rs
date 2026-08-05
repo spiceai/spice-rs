@@ -454,14 +454,19 @@ pub(crate) struct QueryHttpClient {
 }
 
 impl QueryHttpClient {
-    /// Builds a client carrying the same-origin redirect policy, so this constructor cannot
-    /// be the one path that leaks the API key across origins (#12502).
+    /// Builds a client carrying the same-origin redirect policy (#12502), for tests that need
+    /// one pointed at a mock server.
+    ///
+    /// Test-only: in production the sole construction path is [`Self::with_client`], fed by
+    /// `SpiceClientBuilder::build`. Keeping it that way is what makes the policy impossible to
+    /// miss, so this is gated rather than left as an unused second door into the type.
     ///
     /// # Errors
     ///
     /// Returns an error if the TLS backend cannot be initialised. The policy is the reason
     /// this is fallible where `reqwest::Client::new` — the call it replaces — panicked: a
     /// client built by defaulting past the failure would silently not carry it.
+    #[cfg(test)]
     pub fn new(base_url: &str, api_key: Option<String>) -> Result<Self, reqwest::Error> {
         let client = crate::redirect::credentialed_client_builder().build()?;
 
