@@ -59,7 +59,7 @@ mod tests {
                 Some(spice_client) => spice_client,
                 None => {
                     eprintln!(
-                        "skipping cloud test: SCP_SPICEAI_TPCH_API_KEY is unset or empty (expected on a fork pull request)"
+                        "skipping cloud test: SCP_SPICEAI_TPCH_API_KEY is unset or empty - set it to run the cloud tests. Expected on a fork pull request, which cannot read repository secrets, and on a local run without the variable exported; on a branch that can read secrets, it means the secret is missing or misconfigured."
                     );
                     return;
                 }
