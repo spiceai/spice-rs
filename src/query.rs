@@ -482,6 +482,21 @@ impl QueryHttpClient {
         }
     }
 
+    /// The underlying reqwest client, for request builders constructed in sibling modules.
+    pub(crate) fn client(&self) -> &reqwest::Client {
+        &self.client
+    }
+
+    /// The runtime's HTTP base URL, with any trailing slash already trimmed.
+    pub(crate) fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// Applies the configured API key to a request, if one is set.
+    pub(crate) fn authorized(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        self.add_auth(req)
+    }
+
     fn add_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.api_key {
             Some(key) => req.header("X-API-Key", key),

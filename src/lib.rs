@@ -8,6 +8,7 @@ mod flight;
 mod params;
 pub mod query;
 mod redirect;
+pub mod status;
 pub mod tls;
 mod util;
 
@@ -24,6 +25,7 @@ pub use query::{
     QueryError, QueryInfo, QueryJob, QueryListResponse, QueryResult, QueryResultStream,
     QueryStatus, QuerySubmitOptions, QuerySummary,
 };
+pub use status::{ComponentStatus, ConnectionDetails, StatusError};
 
 // Further public exports and integrations
 pub use futures::StreamExt;
