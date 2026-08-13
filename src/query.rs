@@ -33,6 +33,7 @@
 //! }
 //! ```
 
+use crate::active_query::{ActiveQueryError, ActiveQueryList, CancelActiveQueryResponse};
 use crate::dataset::{DatasetError, DatasetRefreshRequest, DatasetRefreshResponse};
 use crate::params::{QueryParameterError, QueryParameters};
 use arrow::array::RecordBatch;
@@ -699,6 +700,75 @@ impl QueryHttpClient {
             status_code => {
                 let response_body = response.text().await.unwrap_or_default();
                 Err(QueryError::HttpRequestFailed {
+                    status_code,
+                    response_body,
+                })
+            }
+        }
+    }
+
+    /// List the synchronous queries the caller currently has running.
+    pub async fn list_active_queries(&self) -> Result<ActiveQueryList, ActiveQueryError> {
+        let url = format!("{}/v1/sql/active", self.base_url);
+
+        let response = self
+            .add_auth(self.client.get(&url))
+            .send()
+            .await
+            .map_err(|e| ActiveQueryError::HttpError {
+                message: e.to_string(),
+            })?;
+
+        match response.status().as_u16() {
+            200 => response
+                .json()
+                .await
+                .map_err(|e| ActiveQueryError::ParseError {
+                    message: e.to_string(),
+                }),
+            403 => Err(ActiveQueryError::WriteAccessRequired),
+            status_code => {
+                let response_body = response.text().await.unwrap_or_default();
+                Err(ActiveQueryError::RequestFailed {
+                    status_code,
+                    response_body,
+                })
+            }
+        }
+    }
+
+    /// Cancel a running synchronous query by id.
+    pub async fn cancel_active_query(
+        &self,
+        query_id: &str,
+    ) -> Result<CancelActiveQueryResponse, ActiveQueryError> {
+        let url = format!("{}/v1/sql/{query_id}/cancel", self.base_url);
+
+        let response = self
+            .add_auth(self.client.post(&url))
+            .send()
+            .await
+            .map_err(|e| ActiveQueryError::HttpError {
+                message: e.to_string(),
+            })?;
+
+        match response.status().as_u16() {
+            200 => response
+                .json()
+                .await
+                .map_err(|e| ActiveQueryError::ParseError {
+                    message: e.to_string(),
+                }),
+            400 => Err(ActiveQueryError::InvalidQueryId {
+                query_id: query_id.to_string(),
+            }),
+            403 => Err(ActiveQueryError::WriteAccessRequired),
+            404 => Err(ActiveQueryError::NotFound {
+                query_id: query_id.to_string(),
+            }),
+            status_code => {
+                let response_body = response.text().await.unwrap_or_default();
+                Err(ActiveQueryError::RequestFailed {
                     status_code,
                     response_body,
                 })

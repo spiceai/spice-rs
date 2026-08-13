@@ -1,3 +1,4 @@
+use crate::active_query::{ActiveQueryError, ActiveQueryList, CancelActiveQueryResponse};
 use crate::flight::RetryableQueryStream;
 use crate::params::{QueryParameterError, QueryParameters};
 use crate::query::{QueryError, QueryHttpClient, QueryJob, QuerySubmitOptions};
@@ -531,6 +532,101 @@ impl SpiceClient {
 
         let job = QueryJob::new(query_id.to_string(), Arc::clone(http_client));
         job.cancel().await
+    }
+
+    /// Lists the *synchronous* queries this client currently has running.
+    ///
+    /// Synchronous queries are the ones started by [`sql()`](Self::sql), FlightSQL,
+    /// `/v1/sql`, NSQL, and search. For async query jobs, use
+    /// [`queries()`](Self::queries) instead.
+    ///
+    /// The runtime does not return a query's id to the client that submitted it,
+    /// so this is how you find the id needed by
+    /// [`cancel_active_query()`](Self::cancel_active_query). Results are scoped to
+    /// this client — another caller's in-flight queries are never listed.
+    ///
+    /// **Note:** Requires [`http_url()`](SpiceClientBuilder::http_url) to be configured.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use spiceai::ClientBuilder;
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    /// let client = ClientBuilder::new()
+    ///     .http_url("http://localhost:8090")
+    ///     .build()
+    ///     .await?;
+    ///
+    /// let active = client.active_queries().await?;
+    /// println!("{} queries running", active.total_count);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// - [`ActiveQueryError::WriteAccessRequired`] if the API key lacks write access
+    /// - [`ActiveQueryError::HttpError`] if the HTTP endpoint is not configured or unreachable
+    pub async fn active_queries(&self) -> Result<ActiveQueryList, ActiveQueryError> {
+        let http_client = self
+            .http_client
+            .as_ref()
+            .ok_or(ActiveQueryError::HttpError {
+                message: "HTTP endpoint not configured. Use ClientBuilder::http_url() to set it."
+                    .to_string(),
+            })?;
+
+        http_client.list_active_queries().await
+    }
+
+    /// Cancels a running *synchronous* query by id.
+    ///
+    /// Takes a `query_id` from [`active_queries()`](Self::active_queries). To cancel
+    /// an async query job instead, use [`cancel_query()`](Self::cancel_query).
+    ///
+    /// Cancellation is scoped to this client: an id belonging to another caller is
+    /// reported as not found rather than cancelled.
+    ///
+    /// **Note:** Requires [`http_url()`](SpiceClientBuilder::http_url) to be configured.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use spiceai::ClientBuilder;
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    /// let client = ClientBuilder::new()
+    ///     .http_url("http://localhost:8090")
+    ///     .build()
+    ///     .await?;
+    ///
+    /// let active = client.active_queries().await?;
+    /// for query in active.queries {
+    ///     client.cancel_active_query(&query.query_id).await?;
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// - [`ActiveQueryError::NotFound`] if no such query is running for this client
+    /// - [`ActiveQueryError::InvalidQueryId`] if `query_id` is not a UUID
+    /// - [`ActiveQueryError::WriteAccessRequired`] if the API key lacks write access
+    pub async fn cancel_active_query(
+        &self,
+        query_id: &str,
+    ) -> Result<CancelActiveQueryResponse, ActiveQueryError> {
+        let http_client = self
+            .http_client
+            .as_ref()
+            .ok_or(ActiveQueryError::HttpError {
+                message: "HTTP endpoint not configured. Use ClientBuilder::http_url() to set it."
+                    .to_string(),
+            })?;
+
+        http_client.cancel_active_query(query_id).await
     }
 
     /// Triggers an on-demand refresh for an accelerated dataset.

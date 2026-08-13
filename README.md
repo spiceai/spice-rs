@@ -168,6 +168,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 ```
 
+### List and cancel running queries
+
+`active_queries()` reports the synchronous queries this client currently has running — the ones started by `sql()`, FlightSQL, `/v1/sql`, NSQL, and search — and `cancel_active_query()` stops one by id.
+
+The runtime does not hand a query's id back to the client that submitted it, so the two are used together: list to find the query, then cancel it. Both are scoped to the caller, so a client only ever sees and cancels its own queries.
+
+```rust,no_run
+use spiceai::ClientBuilder;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+  let client = ClientBuilder::new()
+    .http_url("http://localhost:8090")
+    .build()
+    .await?;
+
+  let active = client.active_queries().await?;
+  println!("{} queries running", active.total_count);
+
+  for query in &active.queries {
+    println!("{} [{}] {}", query.query_id, query.protocol, query.sql_preview);
+  }
+
+  if let Some(query) = active.queries.first() {
+    let cancelled = client.cancel_active_query(&query.query_id).await?;
+    println!("{} is now {}", cancelled.query_id, cancelled.status);
+  }
+
+  Ok(())
+}
+```
+
+To cancel an *async query job* instead, use `cancel_query()` — see [Async query jobs](#async-query-jobs-and-dataset-refresh) above.
+
 ## Documentation
 
 Check out our [Documentation](https://docs.spice.ai/sdks/rust-sdk) to learn more about how to use the Rust SDK.

@@ -1,5 +1,6 @@
 #![doc = include_str!("../README.md")]
 
+pub mod active_query;
 mod client;
 mod config;
 mod dataset;
@@ -10,6 +11,7 @@ mod redirect;
 pub mod tls;
 mod util;
 
+pub use active_query::{ActiveQuery, ActiveQueryError, ActiveQueryList, CancelActiveQueryResponse};
 pub use arrow;
 pub use client::Error as SpiceClientError;
 pub use client::SpiceClient as Client;
