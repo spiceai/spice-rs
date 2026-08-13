@@ -168,6 +168,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 ```
 
+### List and cancel running queries
+
+`active_queries()` reports the synchronous queries currently running in the caller's scope — the ones started by `sql()`, FlightSQL, `/v1/sql`, NSQL, and search — and `cancel_active_query()` stops one by id.
+
+The runtime does not hand a query's id back to the client that submitted it, so the two are used together: list to find the query, then cancel it.
+
+Two boundaries apply, and a query is reachable only inside both.
+
+**One runtime instance.** The runtime tracks active synchronous queries in memory, per instance, and these endpoints report only what the instance answering them knows. A `Client` configures its Flight and HTTP endpoints independently, so behind a load balancer the query submitted over Flight may be running on a different instance than the one answering here — it will not be listed, and its id reports as not found. Point `http_url()` at the instance running the query.
+
+**One authenticated principal**, not a `Client` instance. The principal is whatever credential the runtime authenticates — an API key or a client certificate — so every client presenting the same credential lists and cancels the same queries. Only requests for which the runtime establishes no principal at all share the `public` scope. A query outside the caller's scope is reported as if it did not exist.
+
+> **Runtime version.** Principal scoping on these two endpoints landed in [spiceai/spiceai#12841](https://github.com/spiceai/spiceai/pull/12841) and is in no runtime release up to and including `v2.1.5`. Against an earlier runtime both calls operate on every active query the instance holds, for any caller with write access. Check your runtime version before relying on the scope described above.
+
+```rust,no_run
+use spiceai::ClientBuilder;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+  let client = ClientBuilder::new()
+    .http_url("http://localhost:8090")
+    .build()
+    .await?;
+
+  let active = client.active_queries().await?;
+  println!("{} queries running", active.total_count);
+
+  for query in &active.queries {
+    println!("{} [{}] {}", query.query_id, query.protocol, query.sql_preview);
+  }
+
+  if let Some(query) = active.queries.first() {
+    let cancelled = client.cancel_active_query(&query.query_id).await?;
+    println!("{} is now {}", cancelled.query_id, cancelled.status);
+  }
+
+  Ok(())
+}
+```
+
+To cancel an *async query job* instead, use `cancel_query()` — see [Async query jobs](#async-query-jobs-and-dataset-refresh) above.
+
 ### Search
 
 `search` finds documents similar to a piece of text using the runtime's `/v1/search` endpoint. It runs against datasets that have an embedding column and a loaded embedding model — see [Search & Retrieval](https://docs.spice.ai/features/search-and-retrieval) for how to configure them. Like dataset refresh, it uses the HTTP API, so `http_url()` must be configured.

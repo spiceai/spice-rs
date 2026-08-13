@@ -33,6 +33,7 @@
 //! }
 //! ```
 
+use crate::active_query::{ActiveQueryError, ActiveQueryList, CancelActiveQueryResponse};
 use crate::dataset::{DatasetError, DatasetRefreshRequest, DatasetRefreshResponse};
 use crate::params::{QueryParameterError, QueryParameters};
 use crate::search::{SearchError, SearchRequest, SearchResponse};
@@ -489,6 +490,40 @@ impl QueryHttpClient {
         }
     }
 
+    /// Build a runtime URL whose path is `segments`, with every segment encoded.
+    ///
+    /// Formatting a caller-supplied id into a path string lets that id choose the
+    /// route. `..` is resolved away by the URL parser, and a `#` truncates the
+    /// path at the fragment, so an id of
+    /// `../datasets/orders/acceleration/refresh#` turns
+    /// `/v1/queries/{id}/cancel` into a POST at
+    /// `/v1/datasets/orders/acceleration/refresh` — with this client's API key
+    /// attached. Pushing segments encodes `/`, `?` and `#`; the explicit `.`
+    /// and `..` rejection covers the two the encoder leaves alone because they
+    /// are unreserved.
+    fn build_url<'a>(
+        &self,
+        segments: impl IntoIterator<Item = &'a str>,
+    ) -> Result<reqwest::Url, QueryError> {
+        let mut url = reqwest::Url::parse(&self.base_url).map_err(|e| QueryError::HttpError {
+            message: e.to_string(),
+        })?;
+        {
+            let mut path = url.path_segments_mut().map_err(|_| QueryError::HttpError {
+                message: format!("Base URL {} cannot carry a path", self.base_url),
+            })?;
+            for segment in segments {
+                if segment == "." || segment == ".." {
+                    return Err(QueryError::HttpError {
+                        message: format!("Invalid path segment {segment:?} in request URL"),
+                    });
+                }
+                path.push(segment);
+            }
+        }
+        Ok(url)
+    }
+
     pub async fn submit(
         &self,
         sql: &str,
@@ -505,7 +540,7 @@ impl QueryHttpClient {
         };
 
         let response = self
-            .add_auth(self.client.post(&url))
+            .add_auth(self.client.post(url))
             .json(&body)
             .send()
             .await
@@ -529,10 +564,10 @@ impl QueryHttpClient {
     }
 
     pub async fn get_status(&self, query_id: &str) -> Result<StatusResponse, QueryError> {
-        let url = format!("{}/v1/queries/{}/status", self.base_url, query_id);
+        let url = self.build_url(["v1", "queries", query_id, "status"])?;
 
         let response = self
-            .add_auth(self.client.get(&url))
+            .add_auth(self.client.get(url))
             .send()
             .await
             .map_err(|e| QueryError::HttpError {
@@ -557,10 +592,10 @@ impl QueryHttpClient {
     }
 
     pub async fn get_query(&self, query_id: &str) -> Result<QueryInfoResponse, QueryError> {
-        let url = format!("{}/v1/queries/{}", self.base_url, query_id);
+        let url = self.build_url(["v1", "queries", query_id])?;
 
         let response = self
-            .add_auth(self.client.get(&url))
+            .add_auth(self.client.get(url))
             .send()
             .await
             .map_err(|e| QueryError::HttpError {
@@ -593,13 +628,17 @@ impl QueryHttpClient {
         query_id: &str,
         chunk_index: usize,
     ) -> Result<ResultChunkResponse, QueryError> {
-        let url = format!(
-            "{}/v1/queries/{}/results/chunks/{}",
-            self.base_url, query_id, chunk_index
-        );
+        let url = self.build_url([
+            "v1",
+            "queries",
+            query_id,
+            "results",
+            "chunks",
+            &chunk_index.to_string(),
+        ])?;
 
         let response = self
-            .add_auth(self.client.get(&url))
+            .add_auth(self.client.get(url))
             .send()
             .await
             .map_err(|e| QueryError::HttpError {
@@ -635,13 +674,17 @@ impl QueryHttpClient {
         chunk_index: usize,
         schema: &SchemaRef,
     ) -> Result<Vec<RecordBatch>, QueryError> {
-        let url = format!(
-            "{}/v1/queries/{}/results/chunks/{}",
-            self.base_url, query_id, chunk_index
-        );
+        let url = self.build_url([
+            "v1",
+            "queries",
+            query_id,
+            "results",
+            "chunks",
+            &chunk_index.to_string(),
+        ])?;
 
         let response = self
-            .add_auth(self.client.get(&url))
+            .add_auth(self.client.get(url))
             .send()
             .await
             .map_err(|e| QueryError::HttpError {
@@ -676,10 +719,10 @@ impl QueryHttpClient {
     }
 
     pub async fn cancel(&self, query_id: &str) -> Result<QueryInfoResponse, QueryError> {
-        let url = format!("{}/v1/queries/{}/cancel", self.base_url, query_id);
+        let url = self.build_url(["v1", "queries", query_id, "cancel"])?;
 
         let response = self
-            .add_auth(self.client.post(&url))
+            .add_auth(self.client.post(url))
             .send()
             .await
             .map_err(|e| QueryError::HttpError {
@@ -700,6 +743,100 @@ impl QueryHttpClient {
             status_code => {
                 let response_body = response.text().await.unwrap_or_default();
                 Err(QueryError::HttpRequestFailed {
+                    status_code,
+                    response_body,
+                })
+            }
+        }
+    }
+
+    /// List the synchronous queries the caller currently has running.
+    pub async fn list_active_queries(&self) -> Result<ActiveQueryList, ActiveQueryError> {
+        let url = format!("{}/v1/sql/active", self.base_url);
+
+        let response = self
+            .add_auth(self.client.get(&url))
+            .send()
+            .await
+            .map_err(|e| ActiveQueryError::HttpError {
+                message: e.to_string(),
+            })?;
+
+        match response.status().as_u16() {
+            200 => response
+                .json()
+                .await
+                .map_err(|e| ActiveQueryError::ParseError {
+                    message: e.to_string(),
+                }),
+            403 => Err(ActiveQueryError::WriteAccessRequired),
+            status_code => {
+                let response_body = response.text().await.unwrap_or_default();
+                Err(ActiveQueryError::RequestFailed {
+                    status_code,
+                    response_body,
+                })
+            }
+        }
+    }
+
+    /// Cancel a running synchronous query by id.
+    pub async fn cancel_active_query(
+        &self,
+        query_id: &str,
+    ) -> Result<CancelActiveQueryResponse, ActiveQueryError> {
+        // `query_id` is caller input, and it reaches the runtime as a path
+        // segment. Reject anything that is not a UUID here rather than building
+        // a URL from it: a `.` or `..` survives percent-encoding and is then
+        // resolved away by the URL parser, which would send this POST to a
+        // route the caller never named.
+        if !crate::active_query::is_uuid(query_id) {
+            return Err(ActiveQueryError::InvalidQueryId {
+                query_id: query_id.to_string(),
+            });
+        }
+
+        let mut url =
+            reqwest::Url::parse(&self.base_url).map_err(|e| ActiveQueryError::HttpError {
+                message: e.to_string(),
+            })?;
+        {
+            let mut path_segments =
+                url.path_segments_mut()
+                    .map_err(|_| ActiveQueryError::HttpError {
+                        message: "Base URL cannot be used to cancel a query".to_string(),
+                    })?;
+            path_segments.push("v1");
+            path_segments.push("sql");
+            path_segments.push(query_id);
+            path_segments.push("cancel");
+        }
+
+        let response = self
+            .add_auth(self.client.post(url))
+            .send()
+            .await
+            .map_err(|e| ActiveQueryError::HttpError {
+                message: e.to_string(),
+            })?;
+
+        match response.status().as_u16() {
+            200 => response
+                .json()
+                .await
+                .map_err(|e| ActiveQueryError::ParseError {
+                    message: e.to_string(),
+                }),
+            400 => Err(ActiveQueryError::InvalidQueryId {
+                query_id: query_id.to_string(),
+            }),
+            403 => Err(ActiveQueryError::WriteAccessRequired),
+            404 => Err(ActiveQueryError::NotFound {
+                query_id: query_id.to_string(),
+            }),
+            status_code => {
+                let response_body = response.text().await.unwrap_or_default();
+                Err(ActiveQueryError::RequestFailed {
                     status_code,
                     response_body,
                 })
