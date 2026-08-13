@@ -542,8 +542,12 @@ impl SpiceClient {
     ///
     /// The runtime does not return a query's id to the client that submitted it,
     /// so this is how you find the id needed by
-    /// [`cancel_active_query()`](Self::cancel_active_query). Results are scoped to
-    /// this client — another caller's in-flight queries are never listed.
+    /// [`cancel_active_query()`](Self::cancel_active_query).
+    ///
+    /// Results cover one runtime instance — the one [`http_url()`](SpiceClientBuilder::http_url)
+    /// addresses — and are scoped to the **authenticated principal**, not to this
+    /// client: every client presenting the same credential sees the same queries.
+    /// See [`active_query`](crate::active_query) for the full boundary.
     ///
     /// **Note:** Requires [`http_url()`](SpiceClientBuilder::http_url) to be configured.
     ///
@@ -585,8 +589,10 @@ impl SpiceClient {
     /// Takes a `query_id` from [`active_queries()`](Self::active_queries). To cancel
     /// an async query job instead, use [`cancel_query()`](Self::cancel_query).
     ///
-    /// Cancellation is scoped to this client: an id belonging to another caller is
-    /// reported as not found rather than cancelled.
+    /// Cancellation reaches the runtime instance [`http_url()`](SpiceClientBuilder::http_url)
+    /// addresses, and is scoped to the **authenticated principal**, not to this
+    /// client: any client presenting the same credential can cancel the query, while
+    /// an id outside that scope is reported as not found rather than cancelled.
     ///
     /// **Note:** Requires [`http_url()`](SpiceClientBuilder::http_url) to be configured.
     ///
@@ -611,7 +617,7 @@ impl SpiceClient {
     ///
     /// # Errors
     ///
-    /// - [`ActiveQueryError::NotFound`] if no such query is running for this client
+    /// - [`ActiveQueryError::NotFound`] if no such query is running in the caller's scope
     /// - [`ActiveQueryError::InvalidQueryId`] if `query_id` is not a UUID
     /// - [`ActiveQueryError::WriteAccessRequired`] if the API key lacks write access
     pub async fn cancel_active_query(
@@ -899,7 +905,7 @@ mod tests {
     use serde_json::json;
     use std::time::Duration;
     use tonic::transport::Endpoint;
-    use wiremock::matchers::{body_json, method, path, query_param};
+    use wiremock::matchers::{body_json, method, path, path_regex, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn test_client(http_base_url: Option<&str>) -> SpiceClient {
@@ -1502,5 +1508,237 @@ mod tests {
             .await
             .expect("refresh dataset with explicit overrides");
         assert_eq!(custom_refresh.message, "Refresh scheduled");
+    }
+
+    #[tokio::test]
+    async fn test_active_queries_lists_from_the_runtime() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1/sql/active"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "queries": [
+                    {
+                        "query_id": "0198f0a1-9c3d-7c4e-8a11-2b3c4d5e6f70",
+                        "protocol": "flightsql",
+                        "sql_preview": "SELECT * FROM taxi_trips",
+                        "started_at_ms": 1_750_000_000_000_u64
+                    }
+                ],
+                "total_count": 1
+            })))
+            .mount(&server)
+            .await;
+
+        let client = test_client(Some(&server.uri()));
+        let active = client
+            .active_queries()
+            .await
+            .expect("list the active queries");
+
+        assert_eq!(active.total_count, 1);
+        assert_eq!(
+            active.queries[0].query_id,
+            "0198f0a1-9c3d-7c4e-8a11-2b3c4d5e6f70"
+        );
+        assert_eq!(active.queries[0].protocol, "flightsql");
+    }
+
+    #[tokio::test]
+    async fn test_active_queries_maps_a_forbidden_response() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1/sql/active"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("write access required"))
+            .mount(&server)
+            .await;
+
+        let client = test_client(Some(&server.uri()));
+        let err = client
+            .active_queries()
+            .await
+            .expect_err("a 403 should not list queries");
+
+        assert!(matches!(err, ActiveQueryError::WriteAccessRequired));
+    }
+
+    #[tokio::test]
+    async fn test_active_queries_reports_an_unconfigured_http_endpoint() {
+        let client = test_client(None);
+        let err = client
+            .active_queries()
+            .await
+            .expect_err("listing needs an HTTP endpoint");
+
+        match err {
+            ActiveQueryError::HttpError { message } => {
+                assert!(message.contains("http_url()"), "unexpected: {message}");
+            }
+            other => panic!("expected an HttpError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cancel_active_query_posts_to_the_cancel_route() {
+        let server = MockServer::start().await;
+        let query_id = "0198f0a1-9c3d-7c4e-8a11-2b3c4d5e6f70";
+
+        Mock::given(method("POST"))
+            .and(path(format!("/v1/sql/{query_id}/cancel")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "query_id": query_id,
+                "status": "cancelled"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = test_client(Some(&server.uri()));
+        let cancelled = client
+            .cancel_active_query(query_id)
+            .await
+            .expect("cancel the active query");
+
+        assert_eq!(cancelled.query_id, query_id);
+        assert_eq!(cancelled.status, "cancelled");
+    }
+
+    #[tokio::test]
+    async fn test_cancel_active_query_maps_each_error_status() {
+        let server = MockServer::start().await;
+
+        // Every id here is a well-formed UUID, so each reaches the runtime and
+        // exercises the status mapping rather than the local shape check.
+        const FORBIDDEN: &str = "0198f0a1-9c3d-7c4e-8a11-2b3c4d5e6f71";
+        const MISSING: &str = "0198f0a1-9c3d-7c4e-8a11-2b3c4d5e6f72";
+        const REJECTED: &str = "0198f0a1-9c3d-7c4e-8a11-2b3c4d5e6f73";
+
+        for (id, status) in [(REJECTED, 400), (FORBIDDEN, 403), (MISSING, 404)] {
+            Mock::given(method("POST"))
+                .and(path(format!("/v1/sql/{id}/cancel")))
+                .respond_with(ResponseTemplate::new(status))
+                .mount(&server)
+                .await;
+        }
+
+        let client = test_client(Some(&server.uri()));
+
+        assert!(matches!(
+            client
+                .cancel_active_query(REJECTED)
+                .await
+                .expect_err("400 maps to InvalidQueryId"),
+            ActiveQueryError::InvalidQueryId { query_id } if query_id == REJECTED
+        ));
+        assert!(matches!(
+            client
+                .cancel_active_query(FORBIDDEN)
+                .await
+                .expect_err("403 maps to WriteAccessRequired"),
+            ActiveQueryError::WriteAccessRequired
+        ));
+        assert!(matches!(
+            client
+                .cancel_active_query(MISSING)
+                .await
+                .expect_err("404 maps to NotFound"),
+            ActiveQueryError::NotFound { query_id } if query_id == MISSING
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_cancel_active_query_rejects_an_id_that_could_reroute_the_request() {
+        let server = MockServer::start().await;
+
+        // Any request at all is a failure here: `.` and `..` survive
+        // percent-encoding and the URL parser then resolves them away, so an id
+        // like `..` would turn this POST into one at `/v1/sql/cancel`.
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "query_id": "rerouted",
+                "status": "cancelled"
+            })))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let client = test_client(Some(&server.uri()));
+
+        for id in ["..", ".", "../queries/escape", "not-a-uuid", ""] {
+            let err = client
+                .cancel_active_query(id)
+                .await
+                .expect_err("an id that is not a UUID cannot cancel a query");
+
+            assert!(
+                matches!(err, ActiveQueryError::InvalidQueryId { ref query_id } if query_id == id),
+                "id {id:?} produced {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_async_query_id_cannot_reroute_a_request_onto_another_endpoint() {
+        let server = MockServer::start().await;
+
+        // The routes a query id must never be able to reach. `..` is resolved
+        // away by the URL parser and `#` truncates the path at the fragment, so
+        // an id formatted into a path string chooses the route — and the client
+        // attaches its API key to whatever it then calls.
+        for route in [
+            "/v1/datasets/orders/acceleration/refresh",
+            "/v1/sql/0198f0a1-9c3d-7c4e-8a11-2b3c4d5e6f70/cancel",
+            "/v1/cancel",
+            "/v1/queries",
+        ] {
+            Mock::given(path(route))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"message": "rerouted"})),
+                )
+                .expect(0)
+                .mount(&server)
+                .await;
+        }
+
+        // Anything that does reach the intended route is the runtime's to
+        // refuse, and it answers 404 for an id no job carries.
+        Mock::given(path_regex(r"^/v1/queries/[^/]+(/.*)?$"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let client = test_client(Some(&server.uri()));
+
+        for id in [
+            "..",
+            ".",
+            "../datasets/orders/acceleration/refresh#",
+            "../sql/0198f0a1-9c3d-7c4e-8a11-2b3c4d5e6f70",
+        ] {
+            let job = client.get_query(id).expect("create query handle");
+
+            assert!(job.cancel().await.is_err(), "cancel accepted the id {id:?}");
+            assert!(job.status().await.is_err(), "status accepted the id {id:?}");
+            assert!(
+                job.results().await.is_err(),
+                "results accepted the id {id:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cancel_active_query_reports_an_unconfigured_http_endpoint() {
+        let client = test_client(None);
+        let err = client
+            .cancel_active_query("0198f0a1-9c3d-7c4e-8a11-2b3c4d5e6f70")
+            .await
+            .expect_err("cancellation needs an HTTP endpoint");
+
+        match err {
+            ActiveQueryError::HttpError { message } => {
+                assert!(message.contains("http_url()"), "unexpected: {message}");
+            }
+            other => panic!("expected an HttpError, got {other:?}"),
+        }
     }
 }
