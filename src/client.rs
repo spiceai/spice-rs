@@ -8,6 +8,7 @@ use crate::{
     dataset::{DatasetError, DatasetRefreshRequest, DatasetRefreshResponse},
     flight::{SqlFlightClient, is_connection_reset_generic_error},
     search::{SearchError, SearchRequest, SearchResponse},
+    status::{ConnectionDetails, StatusError},
     tls::{FlightChannelBuilder, ensure_crypto_provider, new_tls_flight_channel},
 };
 use arrow::record_batch::RecordBatch;
@@ -726,6 +727,53 @@ impl SpiceClient {
         })?;
 
         http_client.search(&request).await
+    }
+
+    /// Returns the status of each runtime connection.
+    ///
+    /// Backed by `GET /v1/status`. Where [`is_ready`](Self::is_ready) reports a single
+    /// boolean for the whole runtime, this reports `http`, `flight`, `metrics` and
+    /// `opentelemetry` individually, so it can say *which* component is not ready.
+    ///
+    /// **Note:** Requires [`http_url()`](SpiceClientBuilder::http_url) to be configured.
+    ///
+    /// ```no_run
+    /// # use spiceai::ClientBuilder;
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    /// let client = ClientBuilder::new()
+    ///     .http_url("http://localhost:8090")
+    ///     .build()
+    ///     .await?;
+    ///
+    /// for component in client.runtime_status().await? {
+    ///     println!("{} ({}): {}", component.name, component.endpoint, component.status);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn runtime_status(&self) -> Result<Vec<ConnectionDetails>, StatusError> {
+        let http_client = self
+            .http_client
+            .as_ref()
+            .ok_or(StatusError::HttpNotConfigured)?;
+
+        http_client.runtime_status().await
+    }
+
+    /// Returns whether the runtime is ready to serve queries.
+    ///
+    /// Backed by `GET /v1/ready`. Returns `Ok(false)` when the runtime responds that it
+    /// is not ready; an `Err` means the probe itself could not be completed.
+    ///
+    /// **Note:** Requires [`http_url()`](SpiceClientBuilder::http_url) to be configured.
+    pub async fn is_ready(&self) -> Result<bool, StatusError> {
+        let http_client = self
+            .http_client
+            .as_ref()
+            .ok_or(StatusError::HttpNotConfigured)?;
+
+        http_client.is_ready().await
     }
 }
 

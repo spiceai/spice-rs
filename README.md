@@ -245,6 +245,43 @@ Adding `with_keywords([...])` runs a lexical pass alongside the vector pass, whi
 
 Each `SearchMatch` carries `dataset`, `score` (higher is more similar), `matches` (matched values keyed by source column — a list per column, since one column can contribute several chunks to a match), `primary_key`, `data`, and `metadata`.
 
+### Runtime health and status
+
+`is_ready()` is a single boolean for the whole runtime. When you need to know *which*
+component is not ready, `runtime_status()` reports each connection separately. Both use
+the HTTP API, so configure `http_url()`.
+
+```rust,no_run
+use spiceai::ClientBuilder;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+  let client = ClientBuilder::new()
+    .http_url("http://localhost:8090")
+    .build()
+    .await?;
+
+  if !client.is_ready().await? {
+    println!("runtime is not ready yet");
+  }
+
+  for component in client.runtime_status().await? {
+    println!("{} ({}): {}", component.name, component.endpoint, component.status);
+  }
+  // http (127.0.0.1:8090): Ready
+  // flight (127.0.0.1:50051): Ready
+  // metrics (N/A): Disabled
+  // opentelemetry (127.0.0.1:50051): Ready
+
+  Ok(())
+}
+```
+
+Each `ConnectionDetails` carries the component `name` (`http`, `flight`, `metrics` or
+`opentelemetry`), its `endpoint`, and its `status` — a `ComponentStatus` of `Initializing`,
+`Ready`, `Disabled`, `Error`, `Refreshing`, `ShuttingDown` or `NotLoaded`. A status a
+future runtime adds deserializes into `ComponentStatus::Other` rather than failing.
+
 ## Documentation
 
 Check out our [Documentation](https://docs.spice.ai/sdks/rust-sdk) to learn more about how to use the Rust SDK.
