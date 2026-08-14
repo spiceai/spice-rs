@@ -36,6 +36,7 @@
 use crate::active_query::{ActiveQueryError, ActiveQueryList, CancelActiveQueryResponse};
 use crate::dataset::{DatasetError, DatasetRefreshRequest, DatasetRefreshResponse};
 use crate::params::{QueryParameterError, QueryParameters};
+use crate::search::{SearchError, SearchRequest, SearchResponse};
 use arrow::array::RecordBatch;
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use futures::Stream;
@@ -923,6 +924,43 @@ impl QueryHttpClient {
                 })
             }
         }
+    }
+
+    pub async fn search(&self, request: &SearchRequest) -> Result<SearchResponse, SearchError> {
+        request.validate()?;
+
+        let url = format!("{}/v1/search", self.base_url);
+
+        let response = self
+            .add_auth(self.client.post(&url))
+            .json(request)
+            .send()
+            .await
+            .map_err(|e| SearchError::HttpError {
+                message: e.to_string(),
+            })?;
+
+        let status_code = response.status().as_u16();
+        if status_code != 200 {
+            // The runtime explains search failures in a plain-text body ("No
+            // data sources provided"). Surface it, not just the status code.
+            let response_body = match response.text().await {
+                Ok(body) => body.trim().to_string(),
+                // The status code is already known, so a body that cannot be read
+                // reports why instead of collapsing to an empty string — otherwise
+                // the transport failure is lost and the error reads as if the
+                // runtime had explained nothing.
+                Err(e) => format!("<error body could not be read: {e}>"),
+            };
+            return Err(SearchError::SearchFailed {
+                status_code,
+                response_body,
+            });
+        }
+
+        response.json().await.map_err(|e| SearchError::ParseError {
+            message: e.to_string(),
+        })
     }
 
     /// List queries with optional status filter and limit.
