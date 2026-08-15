@@ -35,6 +35,9 @@
 
 use crate::active_query::{ActiveQueryError, ActiveQueryList, CancelActiveQueryResponse};
 use crate::dataset::{DatasetError, DatasetRefreshRequest, DatasetRefreshResponse};
+use crate::nsql::{
+    NSQL_JSON_MEDIA_TYPE, NSQL_SQL_MEDIA_TYPE, NsqlError, NsqlRequest, NsqlResponse,
+};
 use crate::params::{QueryParameterError, QueryParameters};
 use crate::search::{SearchError, SearchRequest, SearchResponse};
 use arrow::array::RecordBatch;
@@ -961,6 +964,67 @@ impl QueryHttpClient {
         response.json().await.map_err(|e| SearchError::ParseError {
             message: e.to_string(),
         })
+    }
+
+    /// Posts `request` to `/v1/nsql` asking for `accept`, returning the body
+    /// when the runtime answered 200.
+    async fn nsql_body(&self, request: &NsqlRequest, accept: &str) -> Result<String, NsqlError> {
+        request.validate()?;
+
+        let url = format!("{}/v1/nsql", self.base_url);
+
+        let response = self
+            .add_auth(self.client.post(&url))
+            .header(reqwest::header::ACCEPT, accept)
+            .json(request)
+            .send()
+            .await
+            .map_err(|e| NsqlError::HttpError {
+                message: e.to_string(),
+            })?;
+
+        let status_code = response.status().as_u16();
+        let body = match response.text().await {
+            Ok(body) => body,
+            Err(e) => {
+                // On a 200 an unreadable body is a parse failure; on an error
+                // status the code is already known, so report why the
+                // explanation is missing rather than collapsing to an empty
+                // string.
+                if status_code == 200 {
+                    return Err(NsqlError::ParseError {
+                        message: e.to_string(),
+                    });
+                }
+                format!("<error body could not be read: {e}>")
+            }
+        };
+
+        if status_code != 200 {
+            // The runtime explains NSQL failures in a plain-text body — a
+            // missing or ambiguous model, or SQL that would not run. Surface
+            // it, not just the status code.
+            return Err(NsqlError::NsqlFailed {
+                status_code,
+                response_body: body.trim().to_string(),
+            });
+        }
+
+        Ok(body)
+    }
+
+    pub async fn nsql(&self, request: &NsqlRequest) -> Result<NsqlResponse, NsqlError> {
+        let body = self.nsql_body(request, NSQL_JSON_MEDIA_TYPE).await?;
+
+        serde_json::from_str(&body).map_err(|e| NsqlError::ParseError {
+            message: e.to_string(),
+        })
+    }
+
+    pub async fn nsql_generate_sql(&self, request: &NsqlRequest) -> Result<String, NsqlError> {
+        let body = self.nsql_body(request, NSQL_SQL_MEDIA_TYPE).await?;
+
+        Ok(body.trim().to_string())
     }
 
     /// List queries with optional status filter and limit.

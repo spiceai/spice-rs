@@ -245,6 +245,69 @@ Adding `with_keywords([...])` runs a lexical pass alongside the vector pass, whi
 
 Each `SearchMatch` carries `dataset`, `score` (higher is more similar), `matches` (matched values keyed by source column — a list per column, since one column can contribute several chunks to a match), `primary_key`, `data`, and `metadata`.
 
+### Text-to-SQL (NSQL)
+
+`nsql()` answers a question in natural language: the configured LLM generates SQL, the
+runtime runs it read-only, and both the rows and the generated query come back. It needs
+an LLM model in the Spicepod — see [Text to SQL](https://docs.spice.ai/features/text-to-sql)
+for how to configure one.
+
+```rust,no_run
+use spiceai::{ClientBuilder, NsqlRequest};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+  let client = ClientBuilder::new()
+    .http_url("http://localhost:8090")
+    .build()
+    .await?;
+
+  let response = client
+    .nsql(NsqlRequest::new("top 5 customers by revenue").with_datasets(["sales"]))
+    .await?;
+
+  println!("generated SQL: {}", response.sql);
+  for row in response {
+    println!("{row:?}");
+  }
+
+  Ok(())
+}
+```
+
+`NsqlRequest` takes the question plus `with_model()` (needed only when the Spicepod
+configures more than one compatible model), `with_datasets()` (a hint about what to
+sample for the model's context — it does not restrict which tables the generated query
+may reference), `with_sample_data()`, and `with_prompt_cache_key()`.
+
+Rows in `data` are decoded from JSON, so they carry JSON's types rather than the Arrow
+types named in `schema`. When Arrow types matter, generate the query and run it yourself
+— which is also how to inspect or edit a generated query before it runs:
+
+```rust,no_run
+use spiceai::{ClientBuilder, NsqlRequest, StreamExt};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+  let client = ClientBuilder::new()
+    .http_url("http://localhost:8090")
+    .build()
+    .await?;
+
+  let sql = client
+    .nsql_generate_sql(NsqlRequest::new("top 5 customers by revenue"))
+    .await?;
+  println!("{sql}");
+
+  let mut stream = client.sql(&sql).await?;
+  while let Some(batch) = stream.next().await {
+    println!("rows: {}", batch?.num_rows());
+  }
+
+  Ok(())
+}
+```
+
 ### Runtime health and status
 
 `is_ready()` is a single boolean for the whole runtime. When you need to know *which*
