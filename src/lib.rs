@@ -5,6 +5,7 @@ mod client;
 mod config;
 mod dataset;
 mod flight;
+pub mod nsql;
 mod params;
 pub mod query;
 mod redirect;
@@ -21,6 +22,7 @@ pub use client::SpiceClientBuilder as ClientBuilder;
 pub use dataset::{
     DatasetError, DatasetRefreshMode, DatasetRefreshRequest, DatasetRefreshResponse,
 };
+pub use nsql::{NsqlError, NsqlField, NsqlRequest, NsqlResponse, NsqlSchema};
 pub use params::{QueryParameter, QueryParameterError, QueryParameters};
 pub use query::{
     QueryError, QueryInfo, QueryJob, QueryListResponse, QueryResult, QueryResultStream,

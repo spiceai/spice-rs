@@ -7,6 +7,7 @@ use crate::{
     config::{GenericError, SPICE_CLOUD_FLIGHT_ADDR, SPICE_LOCAL_FLIGHT_ADDR},
     dataset::{DatasetError, DatasetRefreshRequest, DatasetRefreshResponse},
     flight::{SqlFlightClient, is_connection_reset_generic_error},
+    nsql::{NsqlError, NsqlRequest, NsqlResponse},
     search::{SearchError, SearchRequest, SearchResponse},
     status::{ConnectionDetails, StatusError},
     tls::{FlightChannelBuilder, ensure_crypto_provider, new_tls_flight_channel},
@@ -729,6 +730,94 @@ impl SpiceClient {
         http_client.search(&request).await
     }
 
+    /// Answers a natural-language question by generating SQL and running it.
+    ///
+    /// Backed by `POST /v1/nsql`: the configured LLM translates the question,
+    /// the runtime executes the result read-only, and both the rows and the
+    /// generated SQL come back. Requires an LLM model in the Spicepod — see
+    /// [Text to SQL](https://docs.spice.ai/features/text-to-sql) for how to
+    /// configure one.
+    ///
+    /// **Note:** Requires [`http_url()`](SpiceClientBuilder::http_url) to be configured.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use spiceai::{ClientBuilder, NsqlRequest};
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    /// let client = ClientBuilder::new()
+    ///     .http_url("http://localhost:8090")
+    ///     .build()
+    ///     .await?;
+    ///
+    /// let response = client
+    ///     .nsql(NsqlRequest::new("top 5 customers by revenue").with_datasets(["sales"]))
+    ///     .await?;
+    ///
+    /// println!("generated SQL: {}", response.sql);
+    /// for row in response {
+    ///     println!("{row:?}");
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// - [`NsqlError::InvalidRequest`] if the request has an empty query
+    /// - [`NsqlError::HttpError`] if the HTTP endpoint is not configured or unreachable
+    /// - [`NsqlError::NsqlFailed`] if the runtime rejects the request, which is
+    ///   what a missing or ambiguous model reports as
+    pub async fn nsql(&self, request: NsqlRequest) -> Result<NsqlResponse, NsqlError> {
+        let http_client = self.http_client.as_ref().ok_or(NsqlError::HttpError {
+            message: "HTTP endpoint not configured. Use ClientBuilder::http_url() to set it."
+                .to_string(),
+        })?;
+
+        http_client.nsql(&request).await
+    }
+
+    /// Translates a natural-language question into SQL without running it.
+    ///
+    /// Use it to inspect or edit the query before running it, or to run it
+    /// through [`query`](Self::query) or the Flight path so results arrive as
+    /// Arrow rather than decoded JSON.
+    ///
+    /// **Note:** Requires [`http_url()`](SpiceClientBuilder::http_url) to be configured.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use spiceai::{ClientBuilder, NsqlRequest};
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    /// let client = ClientBuilder::new()
+    ///     .http_url("http://localhost:8090")
+    ///     .build()
+    ///     .await?;
+    ///
+    /// let sql = client
+    ///     .nsql_generate_sql(NsqlRequest::new("top 5 customers by revenue"))
+    ///     .await?;
+    ///
+    /// println!("{sql}");
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Same as [`nsql`](Self::nsql).
+    pub async fn nsql_generate_sql(&self, request: NsqlRequest) -> Result<String, NsqlError> {
+        let http_client = self.http_client.as_ref().ok_or(NsqlError::HttpError {
+            message: "HTTP endpoint not configured. Use ClientBuilder::http_url() to set it."
+                .to_string(),
+        })?;
+
+        http_client.nsql_generate_sql(&request).await
+    }
+
     /// Returns the status of each runtime connection.
     ///
     /// Backed by `GET /v1/status`. Where [`is_ready`](Self::is_ready) reports a single
@@ -1003,7 +1092,7 @@ mod tests {
     use serde_json::json;
     use std::time::Duration;
     use tonic::transport::Endpoint;
-    use wiremock::matchers::{body_json, method, path, path_regex, query_param};
+    use wiremock::matchers::{body_json, header, method, path, path_regex, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn test_client(http_base_url: Option<&str>) -> SpiceClient {
@@ -1717,6 +1806,138 @@ mod tests {
             .search(SearchRequest::new("tokyo"))
             .await
             .expect_err("search without an HTTP endpoint fails");
+        assert!(err.to_string().contains("http_url"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_nsql_posts_request_and_parses_response() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/nsql"))
+            // Without this media type the runtime answers with a bare array of
+            // rows and the generated SQL is lost, so pin it.
+            .and(header("accept", "application/vnd.spiceai.nsql.v1+json"))
+            .and(body_json(json!({
+                "query": "top 5 customers by revenue",
+                "datasets": ["sales"],
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "row_count": 2,
+                "schema": {
+                    "fields": [
+                        {"name": "customer_id", "data_type": "Utf8", "nullable": false},
+                        {"name": "total", "data_type": "Int64", "nullable": false}
+                    ]
+                },
+                "data": [
+                    {"customer_id": "12345", "total": 150_000},
+                    {"customer_id": "67890", "total": 125_000}
+                ],
+                "sql": "SELECT customer_id, sum(total) AS total FROM sales GROUP BY customer_id"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = test_client(Some(&server.uri()));
+
+        let response = client
+            .nsql(NsqlRequest::new("top 5 customers by revenue").with_datasets(["sales"]))
+            .await
+            .expect("nsql succeeds");
+
+        assert_eq!(
+            response.sql,
+            "SELECT customer_id, sum(total) AS total FROM sales GROUP BY customer_id"
+        );
+        assert_eq!(response.row_count, 2);
+        assert_eq!(response.len(), 2);
+        assert_eq!(response.data[0]["customer_id"], "12345");
+        assert_eq!(response.schema.fields.len(), 2);
+        assert_eq!(response.schema.fields[0].data_type, "Utf8");
+    }
+
+    #[tokio::test]
+    async fn test_nsql_generate_sql_requests_the_sql_media_type() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/nsql"))
+            .and(header("accept", "application/sql"))
+            .respond_with(
+                // This media type answers with the bare query text.
+                ResponseTemplate::new(200).set_body_string("\n  SELECT count(*) FROM orders\n"),
+            )
+            .mount(&server)
+            .await;
+
+        let client = test_client(Some(&server.uri()));
+
+        let sql = client
+            .nsql_generate_sql(NsqlRequest::new("how many orders"))
+            .await
+            .expect("nsql_generate_sql succeeds");
+
+        assert_eq!(sql, "SELECT count(*) FROM orders");
+    }
+
+    #[tokio::test]
+    async fn test_nsql_surfaces_runtime_error_body() {
+        let server = MockServer::start().await;
+
+        // A missing or ambiguous model is the most common NSQL failure and the
+        // runtime explains it in the body.
+        Mock::given(method("POST"))
+            .and(path("/v1/nsql"))
+            .respond_with(
+                ResponseTemplate::new(400).set_body_string(
+                    "No model specified and no compatible LLM model is configured.",
+                ),
+            )
+            .mount(&server)
+            .await;
+
+        let client = test_client(Some(&server.uri()));
+
+        let err = client
+            .nsql(NsqlRequest::new("how many orders"))
+            .await
+            .expect_err("runtime rejects the request");
+
+        let message = err.to_string();
+        assert!(message.contains("No model specified"), "{message}");
+        assert!(message.contains("400"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn test_nsql_validates_before_sending() {
+        let server = MockServer::start().await;
+        // No mock is mounted: a request reaching the server fails the test.
+        let client = test_client(Some(&server.uri()));
+
+        let err = client
+            .nsql(NsqlRequest::new("   "))
+            .await
+            .expect_err("empty query is rejected");
+        assert!(err.to_string().contains("non-empty"), "{err}");
+
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_nsql_requires_http_url() {
+        let client = test_client(None);
+
+        let err = client
+            .nsql(NsqlRequest::new("how many orders"))
+            .await
+            .expect_err("nsql without an HTTP endpoint fails");
         assert!(err.to_string().contains("http_url"), "{err}");
     }
 
