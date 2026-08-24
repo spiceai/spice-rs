@@ -36,7 +36,8 @@
 use crate::active_query::{ActiveQueryError, ActiveQueryList, CancelActiveQueryResponse};
 use crate::dataset::{DatasetError, DatasetRefreshRequest, DatasetRefreshResponse};
 use crate::nsql::{
-    NSQL_JSON_MEDIA_TYPE, NSQL_SQL_MEDIA_TYPE, NsqlError, NsqlRequest, NsqlResponse,
+    NSQL_JSON_MEDIA_TYPE, NSQL_SQL_MEDIA_TYPE, NsqlContextRequest, NsqlError, NsqlRequest,
+    NsqlResponse,
 };
 use crate::params::{QueryParameterError, QueryParameters};
 use crate::search::{SearchError, SearchRequest, SearchResponse};
@@ -1025,6 +1026,48 @@ impl QueryHttpClient {
         let body = self.nsql_body(request, NSQL_SQL_MEDIA_TYPE).await?;
 
         Ok(body.trim().to_string())
+    }
+
+    /// Fetches the NSQL context block from `GET /v1/nsql/context`.
+    pub async fn nsql_context(&self, request: &NsqlContextRequest) -> Result<String, NsqlError> {
+        request.validate()?;
+
+        let url = format!("{}/v1/nsql/context", self.base_url);
+
+        let response = self
+            .add_auth(self.client.get(&url))
+            .query(&request.query_pairs())
+            .header(reqwest::header::ACCEPT, "text/markdown")
+            .send()
+            .await
+            .map_err(|e| NsqlError::HttpError {
+                message: e.to_string(),
+            })?;
+
+        let status_code = response.status().as_u16();
+        let body = match response.text().await {
+            Ok(body) => body,
+            Err(e) => {
+                if status_code == 200 {
+                    return Err(NsqlError::ParseError {
+                        message: e.to_string(),
+                    });
+                }
+                format!("<error body could not be read: {e}>")
+            }
+        };
+
+        if status_code != 200 {
+            // The runtime explains context failures in a plain-text body — an
+            // unknown dataset, or a missing or ambiguous model. Surface it, not
+            // just the status code.
+            return Err(NsqlError::NsqlFailed {
+                status_code,
+                response_body: body.trim().to_string(),
+            });
+        }
+
+        Ok(body)
     }
 
     /// List queries with optional status filter and limit.

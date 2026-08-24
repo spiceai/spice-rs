@@ -22,7 +22,10 @@ pub use client::SpiceClientBuilder as ClientBuilder;
 pub use dataset::{
     DatasetError, DatasetRefreshMode, DatasetRefreshRequest, DatasetRefreshResponse,
 };
-pub use nsql::{NsqlError, NsqlField, NsqlRequest, NsqlResponse, NsqlSchema};
+pub use nsql::{
+    NSQL_CONTEXT_MAX_LIMIT, NsqlContextRequest, NsqlError, NsqlField, NsqlRequest, NsqlResponse,
+    NsqlSchema,
+};
 pub use params::{QueryParameter, QueryParameterError, QueryParameters};
 pub use query::{
     QueryError, QueryInfo, QueryJob, QueryListResponse, QueryResult, QueryResultStream,

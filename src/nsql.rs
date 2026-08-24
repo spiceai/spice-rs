@@ -31,6 +31,10 @@ pub enum NsqlError {
 /// generated SQL is lost.
 pub(crate) const NSQL_JSON_MEDIA_TYPE: &str = "application/vnd.spiceai.nsql.v1+json";
 
+/// The largest `sampling_limit` / `examples_limit` the runtime accepts on
+/// `/v1/nsql/context`.
+pub const NSQL_CONTEXT_MAX_LIMIT: usize = 100;
+
 /// Media type that makes the runtime generate SQL without executing it.
 pub(crate) const NSQL_SQL_MEDIA_TYPE: &str = "application/sql";
 
@@ -78,6 +82,145 @@ pub struct NsqlRequest {
     /// it across related requests to benefit from it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_cache_key: Option<String>,
+}
+
+/// Options for the runtime's `/v1/nsql/context` endpoint.
+///
+/// Every field is optional: the default request asks for the context block the
+/// runtime would build for all datasets visible to its NSQL model.
+///
+/// ```
+/// use spiceai::NsqlContextRequest;
+///
+/// let request = NsqlContextRequest::new()
+///     .with_datasets(["sales.orders"])
+///     .with_sampling(true);
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NsqlContextRequest {
+    /// The model whose dataset allowlist decides what the context may include.
+    /// When unset, the runtime uses the only compatible model configured in the
+    /// Spicepod, and reports an error if there is not exactly one.
+    pub model: Option<String>,
+
+    /// Datasets to include. When empty, all datasets visible to the selected
+    /// model are included.
+    pub datasets: Vec<String>,
+
+    /// Whether distinct-value samples are included in the context block.
+    pub include_sampling: bool,
+
+    /// Maximum rows per distinct-value sample. The runtime defaults to 3 and
+    /// rejects more than [`NSQL_CONTEXT_MAX_LIMIT`].
+    pub sampling_limit: Option<usize>,
+
+    /// Whether example rows are included. When unset the runtime follows
+    /// `include_sampling`.
+    pub include_examples: Option<bool>,
+
+    /// Maximum example rows per dataset. The runtime defaults to 3 and rejects
+    /// more than [`NSQL_CONTEXT_MAX_LIMIT`].
+    pub examples_limit: Option<usize>,
+}
+
+impl NsqlContextRequest {
+    /// Creates a request for the default context block.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Names the model whose dataset allowlist decides the context.
+    #[must_use]
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
+
+    /// Restricts the context block to `datasets`.
+    #[must_use]
+    pub fn with_datasets<I, S>(mut self, datasets: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.datasets = datasets.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Includes distinct-value samples in the context block.
+    #[must_use]
+    pub fn with_sampling(mut self, include: bool) -> Self {
+        self.include_sampling = include;
+        self
+    }
+
+    /// Caps the rows per distinct-value sample.
+    #[must_use]
+    pub fn with_sampling_limit(mut self, limit: usize) -> Self {
+        self.sampling_limit = Some(limit);
+        self
+    }
+
+    /// Includes example rows in the context block.
+    #[must_use]
+    pub fn with_examples(mut self, include: bool) -> Self {
+        self.include_examples = Some(include);
+        self
+    }
+
+    /// Caps the example rows per dataset.
+    #[must_use]
+    pub fn with_examples_limit(mut self, limit: usize) -> Self {
+        self.examples_limit = Some(limit);
+        self
+    }
+
+    /// Rejects requests the runtime would answer with a `400`, so the error
+    /// names the field to fix rather than reporting a status code.
+    pub(crate) fn validate(&self) -> Result<(), NsqlError> {
+        for (field, value) in [
+            ("sampling_limit", self.sampling_limit),
+            ("examples_limit", self.examples_limit),
+        ] {
+            if let Some(limit) = value
+                && limit > NSQL_CONTEXT_MAX_LIMIT
+            {
+                return Err(NsqlError::InvalidRequest {
+                    message: format!(
+                        "{field} must be at most {NSQL_CONTEXT_MAX_LIMIT}, got {limit}"
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// The request as `/v1/nsql/context` query-string pairs.
+    pub(crate) fn query_pairs(&self) -> Vec<(&'static str, String)> {
+        let mut pairs = Vec::new();
+
+        if let Some(model) = &self.model {
+            pairs.push(("model", model.clone()));
+        }
+        for dataset in &self.datasets {
+            pairs.push(("datasets", dataset.clone()));
+        }
+        if self.include_sampling {
+            pairs.push(("include_sampling", "true".to_string()));
+        }
+        if let Some(limit) = self.sampling_limit {
+            pairs.push(("sampling_limit", limit.to_string()));
+        }
+        if let Some(include) = self.include_examples {
+            pairs.push(("include_examples", include.to_string()));
+        }
+        if let Some(limit) = self.examples_limit {
+            pairs.push(("examples_limit", limit.to_string()));
+        }
+
+        pairs
+    }
 }
 
 impl NsqlRequest {
