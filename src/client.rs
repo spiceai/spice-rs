@@ -7,7 +7,7 @@ use crate::{
     config::{GenericError, SPICE_CLOUD_FLIGHT_ADDR, SPICE_LOCAL_FLIGHT_ADDR},
     dataset::{DatasetError, DatasetRefreshRequest, DatasetRefreshResponse},
     flight::{SqlFlightClient, is_connection_reset_generic_error},
-    nsql::{NsqlError, NsqlRequest, NsqlResponse},
+    nsql::{NsqlContextRequest, NsqlError, NsqlRequest, NsqlResponse},
     search::{SearchError, SearchRequest, SearchResponse},
     status::{ConnectionDetails, StatusError},
     tls::{FlightChannelBuilder, ensure_crypto_provider, new_tls_flight_channel},
@@ -816,6 +816,49 @@ impl SpiceClient {
         })?;
 
         http_client.nsql_generate_sql(&request).await
+    }
+
+    /// Returns the context block `/v1/nsql` builds for its model.
+    ///
+    /// Backed by `GET /v1/nsql/context`. The block is markdown listing the
+    /// in-scope datasets and their schemas, the SQL functions available, and
+    /// optionally sample rows — exactly what [`nsql`](Self::nsql) sends the
+    /// model. Use it to see why a generated query was wrong, or to reuse the
+    /// runtime's schema context in a prompt of your own.
+    ///
+    /// **Note:** Requires [`http_url()`](SpiceClientBuilder::http_url) to be configured.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use spiceai::{ClientBuilder, NsqlContextRequest};
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    /// let client = ClientBuilder::new()
+    ///     .http_url("http://localhost:8090")
+    ///     .build()
+    ///     .await?;
+    ///
+    /// let context = client
+    ///     .nsql_context(NsqlContextRequest::new().with_datasets(["sales.orders"]))
+    ///     .await?;
+    ///
+    /// println!("{context}");
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NsqlError::InvalidRequest`] when a limit exceeds the runtime's
+    /// maximum, and otherwise the same errors as [`nsql`](Self::nsql).
+    pub async fn nsql_context(&self, request: NsqlContextRequest) -> Result<String, NsqlError> {
+        let http_client = self.http_client.as_ref().ok_or(NsqlError::HttpError {
+            message: "HTTP endpoint not configured. Use ClientBuilder::http_url() to set it."
+                .to_string(),
+        })?;
+
+        http_client.nsql_context(&request).await
     }
 
     /// Returns the status of each runtime connection.
@@ -1879,6 +1922,102 @@ mod tests {
             .expect("nsql_generate_sql succeeds");
 
         assert_eq!(sql, "SELECT count(*) FROM orders");
+    }
+
+    #[tokio::test]
+    async fn test_nsql_context_requests_markdown_with_query_params() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1/nsql/context"))
+            .and(header("accept", "text/markdown"))
+            .and(query_param("datasets", "sales.orders"))
+            .and(query_param("include_sampling", "true"))
+            .and(query_param("sampling_limit", "5"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("# Spice.ai NSQL Context\n\n## Datasets\n- `sales.orders`\n"),
+            )
+            .mount(&server)
+            .await;
+
+        let client = test_client(Some(&server.uri()));
+
+        let context = client
+            .nsql_context(
+                NsqlContextRequest::new()
+                    .with_datasets(["sales.orders"])
+                    .with_sampling(true)
+                    .with_sampling_limit(5),
+            )
+            .await
+            .expect("nsql_context succeeds");
+
+        assert!(context.contains("## Datasets"), "{context}");
+        assert!(context.contains("sales.orders"), "{context}");
+    }
+
+    #[tokio::test]
+    async fn test_nsql_context_omits_unset_options() {
+        let server = MockServer::start().await;
+
+        // A default request carries no query string at all, so the runtime
+        // applies its own defaults rather than the SDK guessing them.
+        Mock::given(method("GET"))
+            .and(path("/v1/nsql/context"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("# Spice.ai NSQL Context"))
+            .mount(&server)
+            .await;
+
+        let client = test_client(Some(&server.uri()));
+
+        let request = NsqlContextRequest::new();
+        assert!(request.query_pairs().is_empty());
+
+        client
+            .nsql_context(request)
+            .await
+            .expect("nsql_context succeeds");
+    }
+
+    #[tokio::test]
+    async fn test_nsql_context_validates_limits_before_sending() {
+        let server = MockServer::start().await;
+        // No mock is mounted: a request reaching the server fails the test.
+        let client = test_client(Some(&server.uri()));
+
+        let err = client
+            .nsql_context(NsqlContextRequest::new().with_sampling_limit(101))
+            .await
+            .expect_err("a limit above the runtime maximum is rejected");
+
+        let message = err.to_string();
+        assert!(message.contains("sampling_limit"), "{message}");
+        assert!(message.contains("100"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn test_nsql_context_surfaces_runtime_error_body() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1/nsql/context"))
+            .respond_with(
+                ResponseTemplate::new(400).set_body_string("Dataset 'sales.orders' not found"),
+            )
+            .mount(&server)
+            .await;
+
+        let client = test_client(Some(&server.uri()));
+
+        let err = client
+            .nsql_context(NsqlContextRequest::new().with_datasets(["sales.orders"]))
+            .await
+            .expect_err("runtime rejects the request");
+
+        let message = err.to_string();
+        assert!(message.contains("not found"), "{message}");
+        assert!(message.contains("400"), "{message}");
     }
 
     #[tokio::test]

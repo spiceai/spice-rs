@@ -308,6 +308,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 ```
 
+#### Inspecting the model's context
+
+`nsql_context()` returns the markdown block `nsql()` sends the model: the in-scope
+datasets and their schemas, the SQL functions available, and optionally sample rows.
+Use it to see why a generated query was wrong, or to reuse the runtime's schema
+context in a prompt of your own.
+
+```rust,no_run
+use spiceai::{ClientBuilder, NsqlContextRequest};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+  let client = ClientBuilder::new()
+    .http_url("http://localhost:8090")
+    .build()
+    .await?;
+
+  let context = client
+    .nsql_context(
+      NsqlContextRequest::new()
+        .with_datasets(["sales.orders"])
+        .with_sampling(true),
+    )
+    .await?;
+  println!("{context}");
+
+  Ok(())
+}
+```
+
+Every option is optional — a default `NsqlContextRequest` asks for the context the
+runtime would build for all datasets its NSQL model can see. `with_sampling_limit()`
+and `with_examples_limit()` cap rows per dataset, up to `NSQL_CONTEXT_MAX_LIMIT`.
+
 ### Runtime health and status
 
 `is_ready()` is a single boolean for the whole runtime. When you need to know *which*
