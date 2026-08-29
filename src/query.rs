@@ -2550,8 +2550,28 @@ mod tests {
             // inbound data resets the connection on some platforms, which would
             // discard the response below and fail the request before the status
             // is ever seen.
+            //
+            // Read to the header terminator rather than once: a single read
+            // returns one segment's worth, so a request split across segments
+            // would leave inbound bytes behind and reintroduce the reset
+            // intermittently. The request is a GET, so the terminator is the
+            // end of it. A read timeout bounds the loop, so a client that never
+            // finishes the request cannot hang this thread.
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+            let mut request = Vec::new();
             let mut buf = [0u8; 4096];
-            let _ = stream.read(&mut buf);
+            loop {
+                match stream.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        request.extend_from_slice(&buf[..n]);
+                        if request.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
             // 64 declared, 5 sent.
             let _ = stream.write_all(
                 b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 64\r\n\r\nshort",
