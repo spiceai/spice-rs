@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use snafu::Snafu;
 use std::fmt;
 
-use crate::query::QueryHttpClient;
+use crate::query::{QueryHttpClient, error_body};
 
 /// Errors returned when querying runtime health or status.
 #[derive(Debug, Snafu)]
@@ -144,7 +144,7 @@ impl QueryHttpClient {
                 message: e.to_string(),
             }),
             status_code => {
-                let response_body = response.text().await.unwrap_or_default();
+                let response_body = error_body(response).await;
                 Err(StatusError::RequestFailed {
                     url,
                     status_code,
@@ -171,7 +171,7 @@ impl QueryHttpClient {
             200 => Ok(true),
             503 => Ok(false),
             status_code => {
-                let response_body = response.text().await.unwrap_or_default();
+                let response_body = error_body(response).await;
                 Err(StatusError::RequestFailed {
                     url,
                     status_code,
