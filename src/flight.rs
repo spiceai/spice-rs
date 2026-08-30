@@ -361,11 +361,6 @@ fn is_reset_code(code: tonic::Code) -> bool {
     RESET_CODES.contains(&code)
 }
 
-/// `Debug` renders a [`tonic::Code`] as its variant name.
-fn is_reset_code_name(name: &str) -> bool {
-    RESET_CODES.iter().any(|code| format!("{code:?}") == name)
-}
-
 /// Message fragments that identify a transport reset within a reset code.
 fn has_reset_marker(message: &str) -> bool {
     let message = message.to_lowercase();
@@ -385,113 +380,9 @@ fn is_retryable_status(status: &tonic::Status) -> bool {
     is_tonic_reset_error(status) || status.metadata().contains_key(RETRYABLE_METADATA_KEY)
 }
 
-/// Classifies a `tonic::Status` that survives only as its `{status:?}` rendering.
-///
-/// A status wrapped as `ArrowError::IpcError(format!("{status:?}"))` has lost the type
-/// both typed predicates need. `arrow-flight` 58 and later keep it typed, so at this
-/// crate's dependency range the typed arms carry every reset and this recovery does not
-/// fire; it holds for the erased shape itself, which earlier `arrow-flight` releases
-/// produce throughout their Flight SQL client. Only the code and message are recovered,
-/// and only from an error that is exactly one rendering, so a non-reset code, an
-/// unrelated `INTERNAL`, and any IPC error that is not itself a rendered status all stay
-/// non-retryable.
-///
-/// The `spiceai-retryable` marker is deliberately not read here. It is a metadata key,
-/// and a key cannot be told apart from arbitrary server text at this remove -- metadata
-/// is rendered after quoted values that can imitate its shape. It is honoured on the
-/// typed path, where the map is structured; missing it here only costs a retry.
-fn is_rendered_reset_status(rendered: &str) -> bool {
-    // The whole error has to be the rendering: one that wraps a rendered status, on
-    // either side, is not itself one.
-    let Some(body) = whole_rendered_status(rendered) else {
-        return false;
-    };
-    // `code` comes first and is a bare enum variant, so the next comma ends it.
-    let Some(after_marker) = body.strip_prefix(" code: ") else {
-        return false;
-    };
-    let Some((code, after_code)) = after_marker.split_once(',') else {
-        return false;
-    };
-    if !is_reset_code_name(code) {
-        return false;
-    }
-    // `message` is rendered straight after `code`, and is the only quoted field. Its
-    // contents are text, not structure.
-    let Some(quoted) = after_code.strip_prefix(" message: \"") else {
-        return false;
-    };
-    let Some((message, _)) = split_debug_string(quoted) else {
-        return false;
-    };
-    has_reset_marker(message)
-}
-
-/// Returns the field list of a `Status { .. }` rendering that is the whole of `rendered`.
-///
-/// Braces are matched with quote and escape awareness, so a message or metadata value
-/// carrying a brace or quote cannot close the rendering early, and an error that merely
-/// wraps one is rejected.
-fn whole_rendered_status(rendered: &str) -> Option<&str> {
-    let body = rendered.strip_prefix("Status {")?;
-    let mut depth = 1usize;
-    let mut quoted = false;
-    let mut escaped = false;
-
-    for (i, c) in body.char_indices() {
-        if escaped {
-            escaped = false;
-        } else if quoted {
-            match c {
-                '\\' => escaped = true,
-                '"' => quoted = false,
-                _ => {}
-            }
-        } else {
-            match c {
-                '"' => quoted = true,
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return if i + 1 == body.len() {
-                            Some(&body[..i])
-                        } else {
-                            None
-                        };
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    None
-}
-
-/// Finds the end of a `{:?}`-rendered string, honouring `\` escapes, and returns its raw
-/// contents alongside the text that follows it.
-///
-/// The contents stay escaped. `Debug` escapes only quotes, backslashes and
-/// non-printables, none of which appear in a reset marker, so matching the raw form is
-/// equivalent for classification.
-fn split_debug_string(quoted: &str) -> Option<(&str, &str)> {
-    let mut escaped = false;
-    for (i, c) in quoted.char_indices() {
-        if escaped {
-            escaped = false;
-        } else if c == '\\' {
-            escaped = true;
-        } else if c == '"' {
-            return Some((&quoted[..i], &quoted[i + 1..]));
-        }
-    }
-    None
-}
-
 fn is_connection_reset_flight_error(error: &FlightError) -> bool {
     match error {
         FlightError::Tonic(status) => is_retryable_status(status),
-        FlightError::Arrow(ArrowError::IpcError(rendered)) => is_rendered_reset_status(rendered),
         _ => false,
     }
 }
@@ -504,9 +395,6 @@ pub fn is_connection_reset_generic_error(error: &GenericError) -> bool {
     // it carries nor a rendered one is reachable by downcasting to `tonic::Status`.
     if let Some(error) = error.downcast_ref::<FlightError>() {
         return is_connection_reset_flight_error(error);
-    }
-    if let Some(ArrowError::IpcError(rendered)) = error.downcast_ref::<ArrowError>() {
-        return is_rendered_reset_status(rendered);
     }
     false
 }
@@ -593,6 +481,24 @@ mod tests {
         assert!(!is_tonic_reset_error(&status));
     }
 
+    /// A reset marker under a code that does not report resets is not a reset: the
+    /// message alone never makes an error retryable.
+    #[test]
+    fn test_is_tonic_reset_error_non_reset_code_with_marker() {
+        for status in [
+            tonic::Status::not_found("transport error"),
+            tonic::Status::permission_denied("http2 error"),
+            tonic::Status::invalid_argument("transport error"),
+            tonic::Status::unavailable("transport error"),
+        ] {
+            assert!(
+                !is_tonic_reset_error(&status),
+                "{:?} must stay non-retryable",
+                status.code()
+            );
+        }
+    }
+
     #[test]
     fn test_is_tonic_reset_error_case_insensitive() {
         let status = tonic::Status::internal("HTTP2 ERROR OCCURRED");
@@ -628,28 +534,18 @@ mod tests {
         // So we test the construction logic indirectly
     }
 
-    /// The verbatim error observed in production, after `arrow-flight` rendered the
-    /// typed `tonic::Status` with `{status:?}` into an `ArrowError::IpcError`.
-    const RENDERED_RESET: &str = "Status { code: Unknown, message: \"transport error\", source: Some(tonic::transport::Error(Transport, hyper::Error(Io, Kind(ConnectionReset)))) }";
-
+    /// A status that reached the SDK only as text carries no type to classify. Under
+    /// this crate's `arrow-flight` range the Flight SQL client keeps it typed, so nothing
+    /// produces this shape; a build against an `arrow-flight` that erases the type would
+    /// not retry it.
     #[test]
-    fn test_rendered_reset_retries_as_a_flight_error() {
-        let error = FlightError::Arrow(ArrowError::IpcError(RENDERED_RESET.to_string()));
-        assert!(is_connection_reset_flight_error(&error));
-    }
+    fn test_status_reduced_to_text_does_not_retry() {
+        let rendered = "Status { code: Unknown, message: \"transport error\", source: Some(tonic::transport::Error(Transport, hyper::Error(Io, Kind(ConnectionReset)))) }";
+        let error = FlightError::Arrow(ArrowError::IpcError(rendered.to_string()));
+        assert!(!is_connection_reset_flight_error(&error));
 
-    #[test]
-    fn test_rendered_reset_retries_as_a_boxed_arrow_error() {
-        let error: GenericError = Box::new(ArrowError::IpcError(RENDERED_RESET.to_string()));
-        assert!(is_connection_reset_generic_error(&error));
-    }
-
-    #[test]
-    fn test_rendered_reset_retries_as_a_boxed_flight_error() {
-        let error: GenericError = Box::new(FlightError::Arrow(ArrowError::IpcError(
-            RENDERED_RESET.to_string(),
-        )));
-        assert!(is_connection_reset_generic_error(&error));
+        let error: GenericError = Box::new(ArrowError::IpcError(rendered.to_string()));
+        assert!(!is_connection_reset_generic_error(&error));
     }
 
     /// The Flight SQL client boxes a typed status inside a `FlightError`, which the
@@ -660,29 +556,6 @@ mod tests {
             "transport error",
         ))));
         assert!(is_connection_reset_generic_error(&error));
-    }
-
-    #[test]
-    fn test_rendered_reset_retries_for_every_reset_code() {
-        for code in ["Internal", "Cancelled", "Unknown"] {
-            let rendered =
-                format!("Status {{ code: {code}, message: \"http2 error\", source: None }}");
-            let error = FlightError::Arrow(ArrowError::IpcError(rendered));
-            assert!(
-                is_connection_reset_flight_error(&error),
-                "{code} should be retryable"
-            );
-        }
-    }
-
-    /// The marker is a metadata key, which cannot be told apart from server-controlled
-    /// text once the status is a string, so the rendered path does not read it. Missing
-    /// it only costs a retry; the typed path still honours it.
-    #[test]
-    fn test_rendered_metadata_marker_is_not_read() {
-        let rendered = "Status { code: Aborted, message: \"upstream restarting\", metadata: MetadataMap { headers: {\"spiceai-retryable\": \"true\"} }, source: None }";
-        let error = FlightError::Arrow(ArrowError::IpcError(rendered.to_string()));
-        assert!(!is_connection_reset_flight_error(&error));
     }
 
     #[test]
@@ -698,119 +571,6 @@ mod tests {
         assert!(is_connection_reset_generic_error(&error));
     }
 
-    /// The key names a metadata header, so a message that merely mentions it is not a
-    /// retryable marker.
-    #[test]
-    fn test_rendered_message_mentioning_the_metadata_key_does_not_retry() {
-        let rendered = "Status { code: PermissionDenied, message: \"missing spiceai-retryable header\", source: None }";
-        let error = FlightError::Arrow(ArrowError::IpcError(rendered.to_string()));
-        assert!(!is_connection_reset_flight_error(&error));
-    }
-
-    /// The message is quoted, so an escaped quote inside it must not be read as the end
-    /// of the field: otherwise a server-controlled message can forge the metadata marker.
-    #[test]
-    fn test_rendered_message_forging_the_metadata_marker_does_not_retry() {
-        let rendered = "Status { code: PermissionDenied, message: \"denied\\\" metadata: spiceai-retryable\", source: None }";
-        let error = FlightError::Arrow(ArrowError::IpcError(rendered.to_string()));
-        assert!(!is_connection_reset_flight_error(&error));
-    }
-
-    /// A field delimiter inside the quoted message is message text, not a delimiter, so
-    /// a genuine reset that contains one is still recognised.
-    #[test]
-    fn test_rendered_reset_message_containing_a_field_delimiter_retries() {
-        let rendered = "Status { code: Unknown, message: \"transport error, source: upstream\", source: None }";
-        let error = FlightError::Arrow(ArrowError::IpcError(rendered.to_string()));
-        assert!(is_connection_reset_flight_error(&error));
-    }
-
-    /// An error that merely quotes a status is not a rendered status: the whole IPC
-    /// error has to be the rendering.
-    #[test]
-    fn test_ipc_error_embedding_a_rendered_status_does_not_retry() {
-        let error = FlightError::Arrow(ArrowError::IpcError(format!(
-            "decoder failed after {RENDERED_RESET}"
-        )));
-        assert!(!is_connection_reset_flight_error(&error));
-    }
-
-    /// A header whose value happens to be the key is not the server asking for a retry.
-    #[test]
-    fn test_rendered_metadata_value_matching_the_key_does_not_retry() {
-        let rendered = "Status { code: PermissionDenied, message: \"denied\", metadata: MetadataMap { headers: {\"reason\": \"spiceai-retryable\"} }, source: None }";
-        let error = FlightError::Arrow(ArrowError::IpcError(rendered.to_string()));
-        assert!(!is_connection_reset_flight_error(&error));
-    }
-
-    /// A suffix makes the error something other than a rendered status, just as a prefix
-    /// does.
-    #[test]
-    fn test_ipc_error_appending_to_a_rendered_status_does_not_retry() {
-        let error = FlightError::Arrow(ArrowError::IpcError(format!(
-            "{RENDERED_RESET} while decoding IPC"
-        )));
-        assert!(!is_connection_reset_flight_error(&error));
-    }
-
-    /// An unbalanced brace inside the quoted message is message text, not structure, so
-    /// it must not close the rendering early.
-    #[test]
-    fn test_rendered_reset_message_containing_a_brace_retries() {
-        let rendered = "Status { code: Unknown, message: \"transport error }\", source: None }";
-        let error = FlightError::Arrow(ArrowError::IpcError(rendered.to_string()));
-        assert!(is_connection_reset_flight_error(&error));
-    }
-
-    /// An escaped quote does not end the message, so a marker behind one is still found.
-    #[test]
-    fn test_rendered_reset_message_containing_an_escaped_quote_retries() {
-        let rendered = "Status { code: Unknown, message: \"upstream said \\\"no\\\": transport error\", source: None }";
-        let error = FlightError::Arrow(ArrowError::IpcError(rendered.to_string()));
-        assert!(is_connection_reset_flight_error(&error));
-    }
-
-    /// An escaped quote inside the message must not desynchronise the brace matcher: if
-    /// it did, a later brace in the message would be read as structure.
-    #[test]
-    fn test_rendered_reset_message_with_an_escaped_quote_and_a_brace_retries() {
-        let rendered =
-            "Status { code: Unknown, message: \"said \\\" } transport error\", source: None }";
-        let error = FlightError::Arrow(ArrowError::IpcError(rendered.to_string()));
-        assert!(is_connection_reset_flight_error(&error));
-    }
-
-    /// `message` is a field of the status, not of whatever its source renders, so a
-    /// status carrying no message of its own is not classified by its source's text.
-    #[test]
-    fn test_rendered_status_does_not_borrow_a_message_from_its_source() {
-        let rendered =
-            "Status { code: Unknown, source: Some(Inner { message: \"transport error\" }) }";
-        let error = FlightError::Arrow(ArrowError::IpcError(rendered.to_string()));
-        assert!(!is_connection_reset_flight_error(&error));
-    }
-
-    #[test]
-    fn test_rendered_unrelated_internal_does_not_retry() {
-        let rendered =
-            "Status { code: Internal, message: \"failed to plan the query\", source: None }";
-        let error = FlightError::Arrow(ArrowError::IpcError(rendered.to_string()));
-        assert!(!is_connection_reset_flight_error(&error));
-    }
-
-    #[test]
-    fn test_rendered_non_reset_code_with_marker_does_not_retry() {
-        for code in ["NotFound", "PermissionDenied", "InvalidArgument", "Ok"] {
-            let rendered =
-                format!("Status {{ code: {code}, message: \"transport error\", source: None }}");
-            let error = FlightError::Arrow(ArrowError::IpcError(rendered));
-            assert!(
-                !is_connection_reset_flight_error(&error),
-                "{code} must stay non-retryable even with a reset marker"
-            );
-        }
-    }
-
     #[test]
     fn test_unrelated_ipc_error_does_not_retry() {
         let error = FlightError::Arrow(ArrowError::IpcError(
@@ -819,32 +579,10 @@ mod tests {
         assert!(!is_connection_reset_flight_error(&error));
     }
 
-    /// A marker on its own is not evidence of a reset: it must come from a rendered
-    /// status, with a code that says so.
-    #[test]
-    fn test_ipc_error_mentioning_a_marker_does_not_retry() {
-        let error = FlightError::Arrow(ArrowError::IpcError(
-            "transport error while writing the IPC stream".to_string(),
-        ));
-        assert!(!is_connection_reset_flight_error(&error));
-    }
-
     #[test]
     fn test_flight_protocol_error_with_marker_does_not_retry() {
         let error = FlightError::ProtocolError("transport error".to_string());
         assert!(!is_connection_reset_flight_error(&error));
-    }
-
-    #[test]
-    fn test_non_ipc_arrow_error_carrying_a_rendered_status_does_not_retry() {
-        let error = FlightError::Arrow(ArrowError::ComputeError(RENDERED_RESET.to_string()));
-        assert!(!is_connection_reset_flight_error(&error));
-    }
-
-    #[test]
-    fn test_generic_io_error_carrying_a_rendered_status_does_not_retry() {
-        let error: GenericError = Box::new(std::io::Error::other(RENDERED_RESET));
-        assert!(!is_connection_reset_generic_error(&error));
     }
 
     /// A refused connection is a transport failure, but not the reset shape: tonic
@@ -857,16 +595,16 @@ mod tests {
         assert!(!is_connection_reset_generic_error(&error));
     }
 
-    /// The classification has to reach the state machine, not just the predicate: a
-    /// rendered reset yields `ConnectionReset` and re-arms the query, where an
-    /// unrelated error terminates the stream.
+    /// The classification has to reach the state machine, not just the predicate: a reset
+    /// yields `ConnectionReset` and re-arms the query, where an unrelated error terminates
+    /// the stream.
     #[tokio::test]
-    async fn test_rendered_reset_drives_the_retry_path() {
+    async fn test_reset_drives_the_retry_path() {
         use futures::StreamExt;
         use tonic::transport::channel::Endpoint;
 
-        let failing = stream::iter(vec![Err(FlightError::Arrow(ArrowError::IpcError(
-            RENDERED_RESET.to_string(),
+        let failing = stream::iter(vec![Err(FlightError::Tonic(Box::new(
+            tonic::Status::unknown("transport error"),
         )))]);
         let client = Arc::new(SqlFlightClient::new(
             Endpoint::from_static("http://127.0.0.1:1").connect_lazy(),
