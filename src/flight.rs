@@ -347,35 +347,97 @@ impl Stream for RetryableQueryStream {
     }
 }
 
+/// Metadata key a server sets to mark its own error as safe to retry.
+const RETRYABLE_METADATA_KEY: &str = "spiceai-retryable";
+
+/// gRPC codes a transport reset is reported under.
+const RESET_CODES: [tonic::Code; 3] = [
+    tonic::Code::Internal,
+    tonic::Code::Cancelled,
+    tonic::Code::Unknown,
+];
+
+fn is_reset_code(code: tonic::Code) -> bool {
+    RESET_CODES.contains(&code)
+}
+
+/// `Debug` renders a [`tonic::Code`] as its variant name.
+fn is_reset_code_name(name: &str) -> bool {
+    RESET_CODES.iter().any(|code| format!("{code:?}") == name)
+}
+
+/// Message fragments that identify a transport reset within a reset code.
+fn has_reset_marker(message: &str) -> bool {
+    let message = message.to_lowercase();
+    message.contains("operation was canceled")
+        || message.contains("http2 error")
+        || message.contains("grpc-status header missing")
+        || message.contains("received message with invalid compression flag")
+        || message.contains("error reading a body from connection")
+        || message.contains("transport error")
+}
+
 pub fn is_tonic_reset_error(error: &tonic::Status) -> bool {
-    match error.code() {
-        tonic::Code::Internal | tonic::Code::Cancelled | tonic::Code::Unknown => {
-            let error_message = error.message().to_lowercase();
-            if error_message.contains("operation was canceled")
-                || error_message.contains("http2 error")
-                || error_message.contains("grpc-status header missing")
-                || error_message.contains("received message with invalid compression flag")
-                || error_message.contains("error reading a body from connection")
-                || error_message.contains("transport error")
-            {
-                return true;
-            }
-            false
-        }
+    is_reset_code(error.code()) && has_reset_marker(error.message())
+}
+
+fn is_retryable_status(status: &tonic::Status) -> bool {
+    is_tonic_reset_error(status) || status.metadata().contains_key(RETRYABLE_METADATA_KEY)
+}
+
+/// Classifies a `tonic::Status` that survives only as its `{status:?}` rendering.
+///
+/// A status wrapped as `ArrowError::IpcError(format!("{status:?}"))` -- which is what
+/// `arrow-flight` does with the statuses its Flight SQL client sees -- has lost the type
+/// both typed predicates need. The rendering is read back under the same code set and
+/// markers [`is_retryable_status`] applies, so a non-reset code, an unrelated `INTERNAL`,
+/// and any IPC error that is not a rendered status all stay non-retryable.
+fn is_rendered_reset_status(rendered: &str) -> bool {
+    let Some((_, rest)) = rendered.split_once("Status { code: ") else {
+        return false;
+    };
+    // Debug renders `source` last, so anything past it belongs to a nested error.
+    let fields = rest.split(", source: ").next().unwrap_or(rest);
+
+    if fields.contains(RETRYABLE_METADATA_KEY) {
+        return true;
+    }
+
+    let Some((code, _)) = fields.split_once(',') else {
+        return false;
+    };
+    if !is_reset_code_name(code) {
+        return false;
+    }
+
+    let Some((_, after_message)) = fields.split_once("message: \"") else {
+        return false;
+    };
+    let Some((message, _)) = after_message.split_once('"') else {
+        return false;
+    };
+    has_reset_marker(message)
+}
+
+fn is_connection_reset_flight_error(error: &FlightError) -> bool {
+    match error {
+        FlightError::Tonic(status) => is_retryable_status(status),
+        FlightError::Arrow(ArrowError::IpcError(rendered)) => is_rendered_reset_status(rendered),
         _ => false,
     }
 }
 
-fn is_connection_reset_flight_error(error: &FlightError) -> bool {
-    if let FlightError::Tonic(status) = error {
-        return is_tonic_reset_error(status) || status.metadata().contains_key("spiceai-retryable");
-    }
-    false
-}
-
 pub fn is_connection_reset_generic_error(error: &GenericError) -> bool {
     if let Some(status) = error.downcast_ref::<tonic::Status>() {
-        return is_tonic_reset_error(status) || status.metadata().contains_key("spiceai-retryable");
+        return is_retryable_status(status);
+    }
+    // The Flight SQL client boxes its errors as `FlightError`, so neither the typed status
+    // it carries nor a rendered one is reachable by downcasting to `tonic::Status`.
+    if let Some(error) = error.downcast_ref::<FlightError>() {
+        return is_connection_reset_flight_error(error);
+    }
+    if let Some(ArrowError::IpcError(rendered)) = error.downcast_ref::<ArrowError>() {
+        return is_rendered_reset_status(rendered);
     }
     false
 }
@@ -495,5 +557,191 @@ mod tests {
         let _endpoint = Endpoint::from_static("http://localhost:50051");
         // This would fail at connect time, but the SqlFlightClient::new just takes a channel
         // So we test the construction logic indirectly
+    }
+
+    /// The verbatim error observed in production, after `arrow-flight` rendered the
+    /// typed `tonic::Status` with `{status:?}` into an `ArrowError::IpcError`.
+    const RENDERED_RESET: &str = "Status { code: Unknown, message: \"transport error\", source: Some(tonic::transport::Error(Transport, hyper::Error(Io, Kind(ConnectionReset)))) }";
+
+    #[test]
+    fn test_rendered_reset_retries_as_a_flight_error() {
+        let error = FlightError::Arrow(ArrowError::IpcError(RENDERED_RESET.to_string()));
+        assert!(is_connection_reset_flight_error(&error));
+    }
+
+    #[test]
+    fn test_rendered_reset_retries_as_a_boxed_arrow_error() {
+        let error: GenericError = Box::new(ArrowError::IpcError(RENDERED_RESET.to_string()));
+        assert!(is_connection_reset_generic_error(&error));
+    }
+
+    #[test]
+    fn test_rendered_reset_retries_as_a_boxed_flight_error() {
+        let error: GenericError = Box::new(FlightError::Arrow(ArrowError::IpcError(
+            RENDERED_RESET.to_string(),
+        )));
+        assert!(is_connection_reset_generic_error(&error));
+    }
+
+    /// The Flight SQL client boxes a typed status inside a `FlightError`, which the
+    /// `tonic::Status` downcast alone does not reach.
+    #[test]
+    fn test_boxed_flight_error_tonic_retries() {
+        let error: GenericError = Box::new(FlightError::Tonic(Box::new(tonic::Status::unknown(
+            "transport error",
+        ))));
+        assert!(is_connection_reset_generic_error(&error));
+    }
+
+    #[test]
+    fn test_rendered_reset_retries_for_every_reset_code() {
+        for code in ["Internal", "Cancelled", "Unknown"] {
+            let rendered =
+                format!("Status {{ code: {code}, message: \"http2 error\", source: None }}");
+            let error = FlightError::Arrow(ArrowError::IpcError(rendered));
+            assert!(
+                is_connection_reset_flight_error(&error),
+                "{code} should be retryable"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rendered_retryable_metadata_marker_retries() {
+        let rendered = "Status { code: Aborted, message: \"upstream restarting\", metadata: MetadataMap { headers: {\"spiceai-retryable\": \"true\"} }, source: None }";
+        let error = FlightError::Arrow(ArrowError::IpcError(rendered.to_string()));
+        assert!(is_connection_reset_flight_error(&error));
+    }
+
+    #[test]
+    fn test_rendered_unrelated_internal_does_not_retry() {
+        let rendered =
+            "Status { code: Internal, message: \"failed to plan the query\", source: None }";
+        let error = FlightError::Arrow(ArrowError::IpcError(rendered.to_string()));
+        assert!(!is_connection_reset_flight_error(&error));
+    }
+
+    #[test]
+    fn test_rendered_non_reset_code_with_marker_does_not_retry() {
+        for code in ["NotFound", "PermissionDenied", "InvalidArgument", "Ok"] {
+            let rendered =
+                format!("Status {{ code: {code}, message: \"transport error\", source: None }}");
+            let error = FlightError::Arrow(ArrowError::IpcError(rendered));
+            assert!(
+                !is_connection_reset_flight_error(&error),
+                "{code} must stay non-retryable even with a reset marker"
+            );
+        }
+    }
+
+    #[test]
+    fn test_unrelated_ipc_error_does_not_retry() {
+        let error = FlightError::Arrow(ArrowError::IpcError(
+            "Unable to get root as message: invalid flatbuffer".to_string(),
+        ));
+        assert!(!is_connection_reset_flight_error(&error));
+    }
+
+    /// A marker on its own is not evidence of a reset: it must come from a rendered
+    /// status, with a code that says so.
+    #[test]
+    fn test_ipc_error_mentioning_a_marker_does_not_retry() {
+        let error = FlightError::Arrow(ArrowError::IpcError(
+            "transport error while writing the IPC stream".to_string(),
+        ));
+        assert!(!is_connection_reset_flight_error(&error));
+    }
+
+    #[test]
+    fn test_flight_protocol_error_with_marker_does_not_retry() {
+        let error = FlightError::ProtocolError("transport error".to_string());
+        assert!(!is_connection_reset_flight_error(&error));
+    }
+
+    #[test]
+    fn test_non_ipc_arrow_error_carrying_a_rendered_status_does_not_retry() {
+        let error = FlightError::Arrow(ArrowError::ComputeError(RENDERED_RESET.to_string()));
+        assert!(!is_connection_reset_flight_error(&error));
+    }
+
+    #[test]
+    fn test_generic_io_error_carrying_a_rendered_status_does_not_retry() {
+        let error: GenericError = Box::new(std::io::Error::other(RENDERED_RESET));
+        assert!(!is_connection_reset_generic_error(&error));
+    }
+
+    /// A refused connection is a transport failure, but not the reset shape: tonic
+    /// reports it as `Unavailable`, which gRPC callers already retry themselves.
+    #[test]
+    fn test_connect_error_does_not_retry() {
+        let error: GenericError = Box::new(FlightError::Tonic(Box::new(
+            tonic::Status::unavailable("tcp connect error"),
+        )));
+        assert!(!is_connection_reset_generic_error(&error));
+    }
+
+    /// The classification has to reach the state machine, not just the predicate: a
+    /// rendered reset yields `ConnectionReset` and re-arms the query, where an
+    /// unrelated error terminates the stream.
+    #[tokio::test]
+    async fn test_rendered_reset_drives_the_retry_path() {
+        use futures::StreamExt;
+        use tonic::transport::channel::Endpoint;
+
+        let failing = stream::iter(vec![Err(FlightError::Arrow(ArrowError::IpcError(
+            RENDERED_RESET.to_string(),
+        )))]);
+        let client = Arc::new(SqlFlightClient::new(
+            Endpoint::from_static("http://127.0.0.1:1").connect_lazy(),
+            None,
+            None,
+            None,
+            1,
+        ));
+        let mut retryable = RetryableQueryStream::new(
+            client,
+            "SELECT 1",
+            None,
+            Box::pin(FlightRecordBatchStream::new_from_flight_data(failing)),
+        );
+
+        let first = retryable.next().await.expect("an item");
+        assert!(
+            matches!(first, Err(SpiceClientError::ConnectionReset { .. })),
+            "expected a retryable ConnectionReset, got {first:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unrelated_stream_error_terminates_without_retrying() {
+        use futures::StreamExt;
+        use tonic::transport::channel::Endpoint;
+
+        let failing = stream::iter(vec![Err(FlightError::Arrow(ArrowError::IpcError(
+            "Unable to get root as message: invalid flatbuffer".to_string(),
+        )))]);
+        let client = Arc::new(SqlFlightClient::new(
+            Endpoint::from_static("http://127.0.0.1:1").connect_lazy(),
+            None,
+            None,
+            None,
+            1,
+        ));
+        let mut retryable = RetryableQueryStream::new(
+            client,
+            "SELECT 1",
+            None,
+            Box::pin(FlightRecordBatchStream::new_from_flight_data(failing)),
+        );
+
+        let first = retryable.next().await.expect("an item");
+        assert!(
+            matches!(first, Err(SpiceClientError::QueryStream { .. })),
+            "expected a terminal QueryStream error, got {first:?}"
+        );
+        assert!(
+            retryable.next().await.is_none(),
+            "the stream must be terminated, not retried"
+        );
     }
 }
