@@ -451,6 +451,26 @@ impl Stream for QueryResultStream {
     }
 }
 
+/// Reads the body of a response whose status the caller has already classified
+/// as an error.
+///
+/// Every caller knows the status code by the time it gets here, so a body that
+/// cannot be read reports why instead of collapsing to an empty string. Reading
+/// a body is itself I/O — a connection dropped mid-response, or a truncated
+/// one, fails here — and discarding that error leaves the caller an error whose
+/// body is empty, indistinguishable from a runtime that returned the status and
+/// no explanation. The transport failure is the more useful of the two.
+///
+/// Centralised so a call site added later cannot quietly reintroduce the
+/// discard, in the same way [`crate::redirect::credentialed_client_builder`]
+/// centralises the redirect policy.
+pub(crate) async fn error_body(response: reqwest::Response) -> String {
+    match response.text().await {
+        Ok(body) => body.trim().to_string(),
+        Err(e) => format!("<error body could not be read: {e}>"),
+    }
+}
+
 /// HTTP client configuration for async queries.
 #[derive(Clone)]
 pub(crate) struct QueryHttpClient {
@@ -573,7 +593,7 @@ impl QueryHttpClient {
             }),
             503 => Err(QueryError::ClusterModeRequired),
             status_code => {
-                let response_body = response.text().await.unwrap_or_default();
+                let response_body = error_body(response).await;
                 Err(QueryError::SubmitFailed {
                     status_code,
                     response_body,
@@ -601,7 +621,7 @@ impl QueryHttpClient {
                 query_id: query_id.to_string(),
             }),
             status_code => {
-                let response_body = response.text().await.unwrap_or_default();
+                let response_body = error_body(response).await;
                 Err(QueryError::HttpRequestFailed {
                     status_code,
                     response_body,
@@ -632,7 +652,7 @@ impl QueryHttpClient {
                 query_id: query_id.to_string(),
             }),
             status_code => {
-                let response_body = response.text().await.unwrap_or_default();
+                let response_body = error_body(response).await;
                 Err(QueryError::HttpRequestFailed {
                     status_code,
                     response_body,
@@ -678,7 +698,7 @@ impl QueryHttpClient {
                 query_id: query_id.to_string(),
             }),
             status_code => {
-                let response_body = response.text().await.unwrap_or_default();
+                let response_body = error_body(response).await;
                 Err(QueryError::HttpRequestFailed {
                     status_code,
                     response_body,
@@ -728,7 +748,7 @@ impl QueryHttpClient {
                 query_id: query_id.to_string(),
             }),
             status_code => {
-                let response_body = response.text().await.unwrap_or_default();
+                let response_body = error_body(response).await;
                 Err(QueryError::HttpRequestFailed {
                     status_code,
                     response_body,
@@ -760,7 +780,7 @@ impl QueryHttpClient {
                 response_body: format!("Query {query_id} has already completed"),
             }),
             status_code => {
-                let response_body = response.text().await.unwrap_or_default();
+                let response_body = error_body(response).await;
                 Err(QueryError::HttpRequestFailed {
                     status_code,
                     response_body,
@@ -790,7 +810,7 @@ impl QueryHttpClient {
                 }),
             403 => Err(ActiveQueryError::WriteAccessRequired),
             status_code => {
-                let response_body = response.text().await.unwrap_or_default();
+                let response_body = error_body(response).await;
                 Err(ActiveQueryError::RequestFailed {
                     status_code,
                     response_body,
@@ -854,7 +874,7 @@ impl QueryHttpClient {
                 query_id: query_id.to_string(),
             }),
             status_code => {
-                let response_body = response.text().await.unwrap_or_default();
+                let response_body = error_body(response).await;
                 Err(ActiveQueryError::RequestFailed {
                     status_code,
                     response_body,
@@ -903,7 +923,7 @@ impl QueryHttpClient {
                 message: e.to_string(),
             }),
             400 => {
-                let response_body = response.text().await.unwrap_or_default();
+                let response_body = error_body(response).await;
                 if response_body.contains("does not have acceleration enabled") {
                     Err(DatasetError::AccelerationNotEnabled {
                         dataset_name: dataset_name.to_string(),
@@ -920,7 +940,7 @@ impl QueryHttpClient {
                 dataset_name: dataset_name.to_string(),
             }),
             status_code => {
-                let response_body = response.text().await.unwrap_or_default();
+                let response_body = error_body(response).await;
                 Err(DatasetError::RefreshFailed {
                     dataset_name: dataset_name.to_string(),
                     status_code,
@@ -948,14 +968,7 @@ impl QueryHttpClient {
         if status_code != 200 {
             // The runtime explains search failures in a plain-text body ("No
             // data sources provided"). Surface it, not just the status code.
-            let response_body = match response.text().await {
-                Ok(body) => body.trim().to_string(),
-                // The status code is already known, so a body that cannot be read
-                // reports why instead of collapsing to an empty string — otherwise
-                // the transport failure is lost and the error reads as if the
-                // runtime had explained nothing.
-                Err(e) => format!("<error body could not be read: {e}>"),
-            };
+            let response_body = error_body(response).await;
             return Err(SearchError::SearchFailed {
                 status_code,
                 response_body,
@@ -1120,7 +1133,7 @@ impl QueryHttpClient {
             }
             503 => Err(QueryError::ClusterModeRequired),
             status_code => {
-                let response_body = response.text().await.unwrap_or_default();
+                let response_body = error_body(response).await;
                 Err(QueryError::HttpRequestFailed {
                     status_code,
                     response_body,
@@ -2511,6 +2524,87 @@ mod tests {
             let json = serde_json::to_string(&status).expect("should serialize");
             let back: QueryStatus = serde_json::from_str(&json).expect("should deserialize");
             assert_eq!(back, status, "roundtrip failed for {status}");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // error_body – a body that cannot be read reports why
+    // -----------------------------------------------------------------------
+
+    /// Serves one response that declares more body than it sends and then hangs
+    /// up, so the client sees the status but fails part-way through the body.
+    ///
+    /// A mock server cannot produce this: the failure is in the transport, not
+    /// in anything the runtime could return.
+    fn serve_truncated_error_body() -> String {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            // Drain the request first. Closing a socket that still holds unread
+            // inbound data resets the connection on some platforms, which would
+            // discard the response below and fail the request before the status
+            // is ever seen.
+            //
+            // Read to the header terminator rather than once: a single read
+            // returns one segment's worth, so a request split across segments
+            // would leave inbound bytes behind and reintroduce the reset
+            // intermittently. The request is a GET, so the terminator is the
+            // end of it. A read timeout bounds the loop, so a client that never
+            // finishes the request cannot hang this thread.
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+            let mut request = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match stream.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        request.extend_from_slice(&buf[..n]);
+                        if request.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            // 64 declared, 5 sent.
+            let _ = stream.write_all(
+                b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 64\r\n\r\nshort",
+            );
+            let _ = stream.flush();
+        });
+
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn test_error_body_reports_a_body_it_could_not_read() {
+        let client = test_http_client(&serve_truncated_error_body());
+
+        let err = client
+            .get_status("query-1")
+            .await
+            .expect_err("a 500 with a truncated body is an error");
+
+        match err {
+            QueryError::HttpRequestFailed {
+                status_code,
+                response_body,
+            } => {
+                assert_eq!(status_code, 500);
+                // Before, this collapsed to "" and read as if the runtime had
+                // returned no explanation at all.
+                assert!(
+                    response_body.contains("could not be read"),
+                    "the read failure should be reported, not discarded: {response_body:?}"
+                );
+            }
+            other => panic!("expected HttpRequestFailed, got {other:?}"),
         }
     }
 }
