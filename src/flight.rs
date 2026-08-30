@@ -396,32 +396,57 @@ fn is_rendered_reset_status(rendered: &str) -> bool {
     let Some((_, rest)) = rendered.split_once("Status { code: ") else {
         return false;
     };
-    // Debug renders `source` last, so anything past it belongs to a nested error.
-    let fields = rest.split(", source: ").next().unwrap_or(rest);
-
-    let Some((code, after_code)) = fields.split_once(',') else {
+    // `code` is a bare enum variant, so the first comma ends it.
+    let Some((code, after_code)) = rest.split_once(',') else {
         return false;
     };
 
-    // `message` is the only quoted field, and the rest of the field list follows its
-    // closing quote.
-    let (message, after_message) = match after_code.split_once("message: \"") {
-        Some((_, quoted)) => match quoted.split_once('"') {
+    // Debug renders the fields in order -- code, message, details, metadata, source --
+    // and only `message` is quoted. Its contents are text, not structure, so the field
+    // list resumes at its closing quote and not at any delimiter it happens to contain.
+    let (message, after_message) = match after_code.strip_prefix(" message: \"") {
+        Some(quoted) => match split_debug_string(quoted) {
             Some(split) => split,
             None => return false,
         },
         None => ("", after_code),
     };
 
+    // `source` renders last and carries a nested error; nothing past it is this status.
+    let tail = after_message
+        .split(", source: ")
+        .next()
+        .unwrap_or(after_message);
+
     // The key names a metadata header, so the search is scoped to the rendered metadata
     // map. A message that merely mentions the key is not a marker.
-    if let Some((_, metadata)) = after_message.split_once("metadata: ")
+    if let Some((_, metadata)) = tail.split_once("metadata: ")
         && metadata.contains(RETRYABLE_METADATA_KEY)
     {
         return true;
     }
 
     is_reset_code_name(code) && has_reset_marker(message)
+}
+
+/// Finds the end of a `{:?}`-rendered string, honouring `\` escapes, and returns its raw
+/// contents alongside the text that follows it.
+///
+/// The contents stay escaped. `Debug` escapes only quotes, backslashes and
+/// non-printables, none of which appear in a reset marker, so matching the raw form is
+/// equivalent for classification.
+fn split_debug_string(quoted: &str) -> Option<(&str, &str)> {
+    let mut escaped = false;
+    for (i, c) in quoted.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == '"' {
+            return Some((&quoted[..i], &quoted[i + 1..]));
+        }
+    }
+    None
 }
 
 fn is_connection_reset_flight_error(error: &FlightError) -> bool {
@@ -625,6 +650,24 @@ mod tests {
         let rendered = "Status { code: PermissionDenied, message: \"missing spiceai-retryable header\", source: None }";
         let error = FlightError::Arrow(ArrowError::IpcError(rendered.to_string()));
         assert!(!is_connection_reset_flight_error(&error));
+    }
+
+    /// The message is quoted, so an escaped quote inside it must not be read as the end
+    /// of the field: otherwise a server-controlled message can forge the metadata marker.
+    #[test]
+    fn test_rendered_message_forging_the_metadata_marker_does_not_retry() {
+        let rendered = "Status { code: PermissionDenied, message: \"denied\\\" metadata: spiceai-retryable\", source: None }";
+        let error = FlightError::Arrow(ArrowError::IpcError(rendered.to_string()));
+        assert!(!is_connection_reset_flight_error(&error));
+    }
+
+    /// A field delimiter inside the quoted message is message text, not a delimiter, so
+    /// a genuine reset that contains one is still recognised.
+    #[test]
+    fn test_rendered_reset_message_containing_a_field_delimiter_retries() {
+        let rendered = "Status { code: Unknown, message: \"transport error, source: upstream\", source: None }";
+        let error = FlightError::Arrow(ArrowError::IpcError(rendered.to_string()));
+        assert!(is_connection_reset_flight_error(&error));
     }
 
     #[test]
