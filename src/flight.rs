@@ -387,11 +387,14 @@ fn is_retryable_status(status: &tonic::Status) -> bool {
 
 /// Classifies a `tonic::Status` that survives only as its `{status:?}` rendering.
 ///
-/// A status wrapped as `ArrowError::IpcError(format!("{status:?}"))` -- which is what
-/// `arrow-flight` does with the statuses its Flight SQL client sees -- has lost the type
-/// both typed predicates need. Only the code and message are recovered, and only from an
-/// error that is exactly one rendering, so a non-reset code, an unrelated `INTERNAL`, and
-/// any IPC error that is not itself a rendered status all stay non-retryable.
+/// A status wrapped as `ArrowError::IpcError(format!("{status:?}"))` has lost the type
+/// both typed predicates need. `arrow-flight` 58 and later keep it typed, so at this
+/// crate's dependency range the typed arms carry every reset and this recovery does not
+/// fire; it holds for the erased shape itself, which earlier `arrow-flight` releases
+/// produce throughout their Flight SQL client. Only the code and message are recovered,
+/// and only from an error that is exactly one rendering, so a non-reset code, an
+/// unrelated `INTERNAL`, and any IPC error that is not itself a rendered status all stay
+/// non-retryable.
 ///
 /// The `spiceai-retryable` marker is deliberately not read here. It is a metadata key,
 /// and a key cannot be told apart from arbitrary server text at this remove -- metadata
