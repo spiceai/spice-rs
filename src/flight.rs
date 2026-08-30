@@ -399,24 +399,29 @@ fn is_rendered_reset_status(rendered: &str) -> bool {
     // Debug renders `source` last, so anything past it belongs to a nested error.
     let fields = rest.split(", source: ").next().unwrap_or(rest);
 
-    if fields.contains(RETRYABLE_METADATA_KEY) {
+    let Some((code, after_code)) = fields.split_once(',') else {
+        return false;
+    };
+
+    // `message` is the only quoted field, and the rest of the field list follows its
+    // closing quote.
+    let (message, after_message) = match after_code.split_once("message: \"") {
+        Some((_, quoted)) => match quoted.split_once('"') {
+            Some(split) => split,
+            None => return false,
+        },
+        None => ("", after_code),
+    };
+
+    // The key names a metadata header, so the search is scoped to the rendered metadata
+    // map. A message that merely mentions the key is not a marker.
+    if let Some((_, metadata)) = after_message.split_once("metadata: ")
+        && metadata.contains(RETRYABLE_METADATA_KEY)
+    {
         return true;
     }
 
-    let Some((code, _)) = fields.split_once(',') else {
-        return false;
-    };
-    if !is_reset_code_name(code) {
-        return false;
-    }
-
-    let Some((_, after_message)) = fields.split_once("message: \"") else {
-        return false;
-    };
-    let Some((message, _)) = after_message.split_once('"') else {
-        return false;
-    };
-    has_reset_marker(message)
+    is_reset_code_name(code) && has_reset_marker(message)
 }
 
 fn is_connection_reset_flight_error(error: &FlightError) -> bool {
@@ -611,6 +616,15 @@ mod tests {
         let rendered = "Status { code: Aborted, message: \"upstream restarting\", metadata: MetadataMap { headers: {\"spiceai-retryable\": \"true\"} }, source: None }";
         let error = FlightError::Arrow(ArrowError::IpcError(rendered.to_string()));
         assert!(is_connection_reset_flight_error(&error));
+    }
+
+    /// The key names a metadata header, so a message that merely mentions it is not a
+    /// retryable marker.
+    #[test]
+    fn test_rendered_message_mentioning_the_metadata_key_does_not_retry() {
+        let rendered = "Status { code: PermissionDenied, message: \"missing spiceai-retryable header\", source: None }";
+        let error = FlightError::Arrow(ArrowError::IpcError(rendered.to_string()));
+        assert!(!is_connection_reset_flight_error(&error));
     }
 
     #[test]
