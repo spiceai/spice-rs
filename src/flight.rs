@@ -350,6 +350,10 @@ impl Stream for RetryableQueryStream {
 /// Metadata key a server sets to mark its own error as safe to retry.
 const RETRYABLE_METADATA_KEY: &str = "spiceai-retryable";
 
+/// The same key as `Debug` renders it in a metadata map: a quoted header name, then its
+/// value. Matching the whole token keeps a header *value* from passing as the key.
+const RENDERED_RETRYABLE_METADATA_KEY: &str = "\"spiceai-retryable\": ";
+
 /// gRPC codes a transport reset is reported under.
 const RESET_CODES: [tonic::Code; 3] = [
     tonic::Code::Internal,
@@ -390,10 +394,13 @@ fn is_retryable_status(status: &tonic::Status) -> bool {
 /// A status wrapped as `ArrowError::IpcError(format!("{status:?}"))` -- which is what
 /// `arrow-flight` does with the statuses its Flight SQL client sees -- has lost the type
 /// both typed predicates need. The rendering is read back under the same code set and
-/// markers [`is_retryable_status`] applies, so a non-reset code, an unrelated `INTERNAL`,
-/// and any IPC error that is not a rendered status all stay non-retryable.
+/// markers [`is_retryable_status`] applies, and the error has to be the rendering rather
+/// than merely quote one, so a non-reset code, an unrelated `INTERNAL`, and any IPC error
+/// that is not itself a rendered status all stay non-retryable.
 fn is_rendered_reset_status(rendered: &str) -> bool {
-    let Some((_, rest)) = rendered.split_once("Status { code: ") else {
+    // The whole error has to be the rendering: an error that merely quotes a status is
+    // not itself one.
+    let Some(rest) = rendered.strip_prefix("Status { code: ") else {
         return false;
     };
     // `code` is a bare enum variant, so the first comma ends it.
@@ -421,7 +428,7 @@ fn is_rendered_reset_status(rendered: &str) -> bool {
     // The key names a metadata header, so the search is scoped to the rendered metadata
     // map. A message that merely mentions the key is not a marker.
     if let Some((_, metadata)) = tail.split_once("metadata: ")
-        && metadata.contains(RETRYABLE_METADATA_KEY)
+        && metadata.contains(RENDERED_RETRYABLE_METADATA_KEY)
     {
         return true;
     }
@@ -668,6 +675,34 @@ mod tests {
         let rendered = "Status { code: Unknown, message: \"transport error, source: upstream\", source: None }";
         let error = FlightError::Arrow(ArrowError::IpcError(rendered.to_string()));
         assert!(is_connection_reset_flight_error(&error));
+    }
+
+    /// An error that merely quotes a status is not a rendered status: the whole IPC
+    /// error has to be the rendering.
+    #[test]
+    fn test_ipc_error_embedding_a_rendered_status_does_not_retry() {
+        let error = FlightError::Arrow(ArrowError::IpcError(format!(
+            "decoder failed after {RENDERED_RESET}"
+        )));
+        assert!(!is_connection_reset_flight_error(&error));
+    }
+
+    /// The marker is a metadata *key*. A header whose value happens to be the key is not
+    /// the server asking for a retry.
+    #[test]
+    fn test_rendered_metadata_value_matching_the_key_does_not_retry() {
+        let rendered = "Status { code: PermissionDenied, message: \"denied\", metadata: MetadataMap { headers: {\"reason\": \"spiceai-retryable\"} }, source: None }";
+        let error = FlightError::Arrow(ArrowError::IpcError(rendered.to_string()));
+        assert!(!is_connection_reset_flight_error(&error));
+    }
+
+    /// The rendered form of the key must stay in step with the key itself.
+    #[test]
+    fn test_rendered_metadata_key_matches_the_typed_key() {
+        assert_eq!(
+            RENDERED_RETRYABLE_METADATA_KEY,
+            format!("\"{RETRYABLE_METADATA_KEY}\": ")
+        );
     }
 
     #[test]
