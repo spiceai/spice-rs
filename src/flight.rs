@@ -18,6 +18,7 @@ use futures::TryStreamExt;
 use futures::stream;
 use futures::task::Context;
 use futures::task::Poll;
+use snafu::Snafu;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::str::FromStr;
@@ -67,7 +68,7 @@ impl SqlFlightClient {
         &self,
         username: &str,
         password: &str,
-    ) -> Result<Option<String>, ArrowError> {
+    ) -> Result<Option<String>, GenericError> {
         let cmd = HandshakeRequest {
             protocol_version: 0,
             payload: Bytes::default(),
@@ -84,7 +85,7 @@ impl SqlFlightClient {
             .clone()
             .handshake(req)
             .await
-            .map_err(|e| ArrowError::IpcError(format!("Can't handshake {e}")))?;
+            .map_err(|source| HandshakeError { source })?;
 
         let mut token: Option<String> = None;
         if let Some(auth) = resp.metadata().get("authorization") {
@@ -347,6 +348,17 @@ impl Stream for RetryableQueryStream {
     }
 }
 
+/// A failed handshake, keeping the server's status reachable rather than rendering it.
+///
+/// The status is the only thing that says whether the failure is worth retrying, and a
+/// rendered one is indistinguishable from a permanent failure. `mod flight` is private,
+/// so this is not part of the crate's public API.
+#[derive(Debug, Snafu)]
+#[snafu(display("Can't handshake: {source}"))]
+pub struct HandshakeError {
+    pub source: tonic::Status,
+}
+
 /// Metadata key a server sets to mark its own error as safe to retry.
 const RETRYABLE_METADATA_KEY: &str = "spiceai-retryable";
 
@@ -395,6 +407,9 @@ pub fn is_connection_reset_generic_error(error: &GenericError) -> bool {
     // it carries nor a rendered one is reachable by downcasting to `tonic::Status`.
     if let Some(error) = error.downcast_ref::<FlightError>() {
         return is_connection_reset_flight_error(error);
+    }
+    if let Some(error) = error.downcast_ref::<HandshakeError>() {
+        return is_retryable_status(&error.source);
     }
     false
 }
@@ -538,6 +553,68 @@ mod tests {
     /// this crate's `arrow-flight` range the Flight SQL client keeps it typed, so nothing
     /// produces this shape; a build against an `arrow-flight` that erases the type would
     /// not retry it.
+    /// A reset that lands on the handshake is the same transient fault as one on the
+    /// query, and the handshake runs before every query an api key is configured for.
+    #[test]
+    fn test_handshake_reset_retries() {
+        let error: GenericError = Box::new(HandshakeError {
+            source: tonic::Status::unknown("transport error"),
+        });
+        assert!(is_connection_reset_generic_error(&error));
+    }
+
+    /// A rejected credential is permanent. Retrying it would turn one bad key into a
+    /// stream of handshakes against the server.
+    #[test]
+    fn test_handshake_auth_failure_does_not_retry() {
+        for status in [
+            tonic::Status::unauthenticated("invalid api key"),
+            tonic::Status::permission_denied("app is not visible to this key"),
+        ] {
+            let code = status.code();
+            let error: GenericError = Box::new(HandshakeError { source: status });
+            assert!(
+                !is_connection_reset_generic_error(&error),
+                "{code:?} must stay permanent"
+            );
+        }
+    }
+
+    /// The failure has to reach callers with the status still typed: rendering it is
+    /// what makes a transient fault indistinguishable from a permanent one.
+    #[tokio::test]
+    async fn test_handshake_failure_preserves_the_typed_status() {
+        use tonic::transport::channel::Endpoint;
+
+        let client = SqlFlightClient::new(
+            Endpoint::from_static("http://127.0.0.1:1").connect_lazy(),
+            Some("an-api-key".to_string()),
+            None,
+            None,
+            1,
+        );
+
+        let error = client
+            .query("SELECT 1")
+            .await
+            .err()
+            .expect("a refused connection fails the handshake");
+        let handshake = error
+            .downcast_ref::<HandshakeError>()
+            .expect("the handshake failure must keep its status typed");
+        assert_eq!(handshake.source.code(), tonic::Code::Unavailable);
+    }
+
+    #[test]
+    fn test_handshake_error_keeps_its_context_and_status() {
+        let error = HandshakeError {
+            source: tonic::Status::unknown("transport error"),
+        };
+        let rendered = error.to_string();
+        assert!(rendered.starts_with("Can't handshake: "), "{rendered}");
+        assert!(rendered.contains("transport error"), "{rendered}");
+    }
+
     #[test]
     fn test_status_reduced_to_text_does_not_retry() {
         let rendered = "Status { code: Unknown, message: \"transport error\", source: Some(tonic::transport::Error(Transport, hyper::Error(Io, Kind(ConnectionReset)))) }";
