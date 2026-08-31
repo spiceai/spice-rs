@@ -1153,6 +1153,73 @@ mod tests {
     use wiremock::matchers::{body_json, header, method, path, path_regex, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    /// Accepts connections and resets them, so every attempt a retry loop makes fails
+    /// the same way and the budget runs out.
+    async fn always_reset_endpoint() -> String {
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    // Let the client send its preface first, so this is a reset rather
+                    // than a refused connection.
+                    let _ = socket.read(&mut [0u8; 1024]).await;
+                    let _ = socket.set_linger(Some(Duration::ZERO));
+                    drop(socket);
+                });
+            }
+        });
+
+        format!("http://{addr}")
+    }
+
+    /// Exercises the wiring, not just the classifier: the reset has to survive the retry
+    /// loop in `sql` itself.
+    #[tokio::test]
+    async fn sql_reports_an_exhausted_reset_as_connection_reset() {
+        let url = always_reset_endpoint().await;
+        let client = SpiceClient::builder()
+            .flight_url(&url)
+            .build()
+            .await
+            .expect("client");
+
+        let error = client
+            .sql("SELECT 1")
+            .await
+            .err()
+            .expect("every attempt resets");
+        assert!(
+            matches!(error, Error::ConnectionReset { .. }),
+            "expected ConnectionReset, got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sql_with_params_reports_an_exhausted_reset_as_connection_reset() {
+        let url = always_reset_endpoint().await;
+        let client = SpiceClient::builder()
+            .flight_url(&url)
+            .build()
+            .await
+            .expect("client");
+
+        let error = client
+            .sql_with_params("SELECT 1", None)
+            .await
+            .err()
+            .expect("every attempt resets");
+        assert!(
+            matches!(error, Error::ConnectionReset { .. }),
+            "expected ConnectionReset, got {error:?}"
+        );
+    }
+
     /// A reset that outlived the retries is still a reset. Reporting it as a plain query
     /// failure loses the only signal that says the failure is worth retrying, and callers
     /// classify on the variant.
