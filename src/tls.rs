@@ -4,11 +4,22 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Once;
+use std::time::Duration;
 
 use tonic::transport::channel::{ClientTlsConfig, Endpoint};
 use tonic::transport::{Channel, Identity};
 
 static INIT: Once = Once::new();
+
+/// How often to send an HTTP/2 PING on a Flight connection.
+///
+/// `PrivateLink` and NLB flows are documented to drop after 350 seconds idle, and nothing
+/// else on the Flight path writes to an idle connection, so the interval has to leave
+/// room for several probes inside that window.
+const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(60);
+
+/// How long a PING may go unacknowledged before the connection is treated as dead.
+const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub fn system_tls_certificate() -> Result<tonic::transport::Certificate, GenericError> {
     // Load root certificates found in the platform's native certificate store.
@@ -102,6 +113,15 @@ impl FlightChannelBuilder {
     pub async fn build(self) -> Result<Channel, GenericError> {
         let mut endpoint = Endpoint::from_str(&self.url)?;
 
+        // tonic sends no HTTP/2 PINGs by default, so a Flight connection is silent
+        // between queries and an idle network flow in front of it can be reaped.
+        // `keep_alive_while_idle` is the part that matters: without it tonic only pings
+        // while an RPC is in flight, which is exactly when the flow is not idle.
+        endpoint = endpoint
+            .http2_keep_alive_interval(KEEP_ALIVE_INTERVAL)
+            .keep_alive_timeout(KEEP_ALIVE_TIMEOUT)
+            .keep_alive_while_idle(true);
+
         if self.url.starts_with("https://") {
             let cert = if let Some(ca_path) = &self.ca_cert_path {
                 let ca_pem = tokio::fs::read(ca_path).await?;
@@ -152,6 +172,27 @@ pub(crate) fn ensure_crypto_provider() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// AWS documents this idle timeout for `PrivateLink` and NLB flows. A flow that goes
+    /// quiet for longer is removed, and the next packet written to it draws a reset.
+    const IDLE_FLOW_TIMEOUT: Duration = Duration::from_secs(350);
+
+    #[test]
+    fn test_keep_alive_probes_well_inside_the_idle_flow_timeout() {
+        assert!(
+            KEEP_ALIVE_INTERVAL + KEEP_ALIVE_TIMEOUT < IDLE_FLOW_TIMEOUT,
+            "a keepalive probe must resolve before an idle flow is reaped"
+        );
+        assert!(
+            KEEP_ALIVE_INTERVAL * 3 < IDLE_FLOW_TIMEOUT,
+            "several probes must fit in one idle window, so a single lost PING does not \
+             leave the flow silent long enough to be reaped"
+        );
+        assert!(
+            KEEP_ALIVE_TIMEOUT < KEEP_ALIVE_INTERVAL,
+            "a PING must be declared lost before the next one is due"
+        );
+    }
 
     #[test]
     fn test_system_tls_certificate_loads() {
