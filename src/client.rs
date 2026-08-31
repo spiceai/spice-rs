@@ -38,6 +38,21 @@ pub enum Error {
     ConnectionReset { message: String },
 }
 
+/// Classifies the error a retry loop gave up on.
+///
+/// A reset that outlived the retries is still a reset. Reporting it as a plain query
+/// failure discards the one thing that tells a caller the failure is transient, and the
+/// classification cannot be recovered downstream: the status is boxed inside an error
+/// type the caller may not share a version of.
+fn exhausted_retry_error(error: GenericError) -> Error {
+    if is_connection_reset_generic_error(&error) {
+        return Error::ConnectionReset {
+            message: error.to_string(),
+        };
+    }
+    Error::Query { source: error }
+}
+
 struct SpiceClientConfig {
     flight_channel: Channel,
 }
@@ -137,7 +152,7 @@ impl SpiceClient {
             }
         })
         .await
-        .map_err(|e| Error::Query { source: e })
+        .map_err(exhausted_retry_error)
     }
 
     /// Executes a synchronous parameterized SQL query against the Spice Flight endpoint.
@@ -187,7 +202,7 @@ impl SpiceClient {
             }
         })
         .await
-        .map_err(|e| Error::Query { source: e })
+        .map_err(exhausted_retry_error)
     }
 
     /// Executes a synchronous parameterized SQL query using scalar bindings.
@@ -1137,6 +1152,34 @@ mod tests {
     use tonic::transport::Endpoint;
     use wiremock::matchers::{body_json, header, method, path, path_regex, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// A reset that outlived the retries is still a reset. Reporting it as a plain query
+    /// failure loses the only signal that says the failure is worth retrying, and callers
+    /// classify on the variant.
+    #[test]
+    fn exhausted_retry_keeps_a_reset_classified() {
+        let error: GenericError = Box::new(tonic::Status::unknown("transport error"));
+        assert!(matches!(
+            exhausted_retry_error(error),
+            Error::ConnectionReset { .. }
+        ));
+    }
+
+    #[test]
+    fn exhausted_retry_reports_other_failures_as_query_errors() {
+        let error: GenericError = Box::new(tonic::Status::invalid_argument("no such table"));
+        assert!(matches!(exhausted_retry_error(error), Error::Query { .. }));
+    }
+
+    /// The message has to survive, or the reset arrives with nothing to diagnose it by.
+    #[test]
+    fn exhausted_retry_keeps_the_reset_message() {
+        let error: GenericError = Box::new(tonic::Status::unknown("transport error"));
+        let Error::ConnectionReset { message } = exhausted_retry_error(error) else {
+            panic!("expected a ConnectionReset");
+        };
+        assert!(message.contains("transport error"), "{message}");
+    }
 
     fn test_client(http_base_url: Option<&str>) -> SpiceClient {
         let flight_channel = Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
