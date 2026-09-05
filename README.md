@@ -113,7 +113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 ### Async query jobs and dataset refresh
 
-Async query management and dataset refresh use the Spice HTTP API. The client addresses the runtime that serves its Flight endpoint, so the local default needs no extra configuration; `http_url()` overrides it when the runtime serves its HTTP API somewhere else.
+Async query management and dataset refresh use the Spice HTTP API. The client pairs it with the Flight endpoint for the two endpoints it knows — the local runtime and Spice Cloud — so neither needs extra configuration. Any other Flight endpoint has no known HTTP counterpart, so a self-hosted runtime still needs `http_url()`, which also overrides the paired default.
 
 ```rust,no_run
 use spiceai::{ClientBuilder, DatasetRefreshMode, DatasetRefreshRequest};
@@ -174,7 +174,7 @@ The runtime does not hand a query's id back to the client that submitted it, so 
 
 Two boundaries apply, and a query is reachable only inside both.
 
-**One runtime instance.** The runtime tracks active synchronous queries in memory, per instance, and these endpoints report only what the instance answering them knows. A `Client`'s HTTP endpoint follows its Flight endpoint but resolves separately, so behind a load balancer the query submitted over Flight may be running on a different instance than the one answering here — it will not be listed, and its id reports as not found. Point `http_url()` at the instance running the query.
+**One runtime instance.** The runtime tracks active synchronous queries in memory, per instance, and these endpoints report only what the instance answering them knows. A `Client`'s HTTP endpoint is paired with its Flight endpoint but resolves separately, so behind a load balancer the query submitted over Flight may be running on a different instance than the one answering here — it will not be listed, and its id reports as not found. Point `http_url()` at the instance running the query.
 
 **One authenticated principal**, not a `Client` instance. The principal is whatever credential the runtime authenticates — an API key or a client certificate — so every client presenting the same credential lists and cancels the same queries. Only requests for which the runtime establishes no principal at all share the `public` scope. A query outside the caller's scope is reported as if it did not exist.
 

@@ -963,16 +963,20 @@ impl SpiceClient {
 /// # }
 /// ```
 ///
-/// The HTTP endpoint that belongs with a Flight endpoint.
+/// The HTTP endpoint that belongs with a Flight endpoint, for the two endpoints whose
+/// pairing this client knows.
 ///
-/// A client pointed at Spice Cloud's Flight endpoint reaches Spice Cloud's HTTP API;
-/// anything else — the local runtime, a self-hosted deployment — is served by the
-/// runtime's own HTTP API, which is `http://localhost:8090` by default.
-fn default_http_url_for(flight_url: &str) -> &'static str {
-    if flight_url == SPICE_CLOUD_FLIGHT_ADDR {
-        SPICE_CLOUD_HTTP_ADDR
-    } else {
-        SPICE_LOCAL_HTTP_ADDR
+/// A client pointed at Spice Cloud's Flight endpoint reaches Spice Cloud's HTTP API, and
+/// one pointed at the local runtime reaches that runtime's HTTP API. Only those two
+/// pairings are known: any other Flight endpoint — a self-hosted deployment, a runtime
+/// behind a proxy — says nothing about where that runtime serves HTTP, and it may not be
+/// on this machine at all. Answering `None` there leaves the HTTP half unset rather than
+/// pointing a credentialed client at whatever is listening on the local HTTP port.
+fn default_http_url_for(flight_url: &str) -> Option<&'static str> {
+    match flight_url {
+        SPICE_CLOUD_FLIGHT_ADDR => Some(SPICE_CLOUD_HTTP_ADDR),
+        SPICE_LOCAL_FLIGHT_ADDR => Some(SPICE_LOCAL_HTTP_ADDR),
+        _ => None,
     }
 }
 
@@ -1127,13 +1131,14 @@ impl SpiceClientBuilder {
         // one runtime serves both, so deriving it here is what keeps the HTTP-backed
         // methods usable on a client that only said where the runtime is. Resolved
         // after the options are applied, so `use_spiceai_cloud()` and `http_url()` can
-        // arrive in either order.
+        // arrive in either order. A Flight endpoint with no known HTTP counterpart
+        // derives nothing, leaving the HTTP-backed methods to report it unconfigured.
         let http_url = self
             .http_url
             .clone()
-            .unwrap_or_else(|| default_http_url_for(url).to_string());
+            .or_else(|| default_http_url_for(url).map(ToString::to_string));
 
-        let http_client = {
+        let http_client = if let Some(http_url) = http_url {
             // Built from the shared helper so the API key cannot follow a redirect off the
             // origin it was configured for (#12502).
             let mut builder = crate::redirect::credentialed_client_builder();
@@ -1155,6 +1160,8 @@ impl SpiceClientBuilder {
                 &http_url,
                 self.api_key.clone(),
             )))
+        } else {
+            None
         };
 
         Ok(SpiceClient {
@@ -2452,6 +2459,30 @@ mod tests {
             .as_ref()
             .expect("the default client can reach the runtime's HTTP API");
         assert_eq!(http.base_url(), SPICE_LOCAL_HTTP_ADDR);
+    }
+
+    // A Flight endpoint this client does not recognise says nothing about where that
+    // runtime serves HTTP, so there is no default to derive: sending the configured API
+    // key to whatever happens to listen on the local HTTP port would leak the credential
+    // to an unrelated service. Leave the HTTP half unset and let the HTTP-backed methods
+    // report that it needs naming.
+    #[tokio::test]
+    async fn a_custom_flight_endpoint_derives_no_http_endpoint() {
+        let client = SpiceClientBuilder::new()
+            .flight_url("https://runtime.example:50051")
+            .api_key("API_KEY")
+            .build()
+            .await
+            .expect("a custom flight endpoint builds a client");
+
+        assert!(
+            client.http_client.is_none(),
+            "a custom Flight endpoint derived an HTTP endpoint: {:?}",
+            client
+                .http_client
+                .as_ref()
+                .map(|c| c.base_url().to_string())
+        );
     }
 
     #[tokio::test]
