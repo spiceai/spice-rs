@@ -4,20 +4,21 @@ use crate::params::{QueryParameterError, QueryParameters};
 use crate::query::{QueryError, QueryHttpClient, QueryJob, QuerySubmitOptions};
 use crate::util::{FibonacciBackoffBuilder, RetryError, retry};
 use crate::{
-    config::{GenericError, SPICE_CLOUD_FLIGHT_ADDR, SPICE_LOCAL_FLIGHT_ADDR},
+    config::{
+        GenericError, SPICE_CLOUD_FLIGHT_ADDR, SPICE_CLOUD_HTTP_ADDR, SPICE_LOCAL_FLIGHT_ADDR,
+        SPICE_LOCAL_HTTP_ADDR,
+    },
     dataset::{DatasetError, DatasetRefreshRequest, DatasetRefreshResponse},
     flight::{SqlFlightClient, is_connection_reset_generic_error},
     nsql::{NsqlContextRequest, NsqlError, NsqlRequest, NsqlResponse},
     search::{SearchError, SearchRequest, SearchResponse},
     status::{ConnectionDetails, StatusError},
-    tls::{FlightChannelBuilder, ensure_crypto_provider, new_tls_flight_channel},
+    tls::{FlightChannelBuilder, ensure_crypto_provider},
 };
 use arrow::record_batch::RecordBatch;
 use arrow_flight::error::FlightError;
 use snafu::Snafu;
 use std::sync::Arc;
-
-use tonic::transport::Channel;
 
 const MAX_RETRIES: u32 = 3;
 
@@ -53,22 +54,6 @@ fn exhausted_retry_error(error: GenericError) -> Error {
     Error::Query { source: error }
 }
 
-struct SpiceClientConfig {
-    flight_channel: Channel,
-}
-
-impl SpiceClientConfig {
-    fn new(flight_channel: Channel) -> Self {
-        SpiceClientConfig { flight_channel }
-    }
-
-    pub async fn load_from_default() -> Result<SpiceClientConfig, GenericError> {
-        let flight_chan = new_tls_flight_channel(SPICE_CLOUD_FLIGHT_ADDR).await?;
-
-        Ok(SpiceClientConfig::new(flight_chan))
-    }
-}
-
 /// The `SpiceClient` is the main entry point for interacting with Spice.
 /// It provides methods for Flight SQL queries and runtime HTTP APIs.
 #[allow(clippy::module_name_repetitions)]
@@ -93,19 +78,11 @@ impl SpiceClient {
     ///
     /// - `Box<dyn Error + Send + Sync>` for any query error
     pub async fn new(api_key: &str) -> Result<Self, GenericError> {
-        ensure_crypto_provider();
-        let config = SpiceClientConfig::load_from_default().await?;
-
-        Ok(Self {
-            flight: Arc::new(SqlFlightClient::new(
-                config.flight_channel,
-                Some(api_key.to_string()),
-                None,
-                None,
-                MAX_RETRIES,
-            )),
-            http_client: None,
-        })
+        SpiceClientBuilder::new()
+            .api_key(api_key)
+            .use_spiceai_cloud()
+            .build()
+            .await
     }
 
     #[must_use]
@@ -254,7 +231,9 @@ impl SpiceClient {
     /// - Retrieve results with [`QueryJob::results()`]
     /// - Cancel the query with [`QueryJob::cancel()`]
     ///
-    /// **Note:** Requires [`http_url()`](SpiceClientBuilder::http_url) to be configured.
+    /// Addresses the client's HTTP endpoint, which defaults to the runtime that serves
+    /// the configured Flight endpoint. [`http_url()`](SpiceClientBuilder::http_url)
+    /// overrides it.
     /// Async queries require cluster mode with `scheduler.state_location` configured.
     ///
     /// # Example
@@ -305,7 +284,9 @@ impl SpiceClient {
     /// handle. To also set a timeout or result-size cap, use
     /// [`query_with_options()`](Self::query_with_options).
     ///
-    /// **Note:** Requires [`http_url()`](SpiceClientBuilder::http_url) to be configured.
+    /// Addresses the client's HTTP endpoint, which defaults to the runtime that serves
+    /// the configured Flight endpoint. [`http_url()`](SpiceClientBuilder::http_url)
+    /// overrides it.
     ///
     /// # Example
     ///
@@ -351,7 +332,9 @@ impl SpiceClient {
     /// result. Any option left unset is omitted from the request so the server
     /// applies its default.
     ///
-    /// **Note:** Requires [`http_url()`](SpiceClientBuilder::http_url) to be configured.
+    /// Addresses the client's HTTP endpoint, which defaults to the runtime that serves
+    /// the configured Flight endpoint. [`http_url()`](SpiceClientBuilder::http_url)
+    /// overrides it.
     ///
     /// # Example
     ///
@@ -417,7 +400,9 @@ impl SpiceClient {
 
     /// Lists async queries on the server.
     ///
-    /// **Note:** Requires [`http_url()`](SpiceClientBuilder::http_url) to be configured.
+    /// Addresses the client's HTTP endpoint, which defaults to the runtime that serves
+    /// the configured Flight endpoint. [`http_url()`](SpiceClientBuilder::http_url)
+    /// overrides it.
     ///
     /// # Arguments
     ///
@@ -469,7 +454,9 @@ impl SpiceClient {
     /// This allows you to resume tracking a query that was submitted earlier,
     /// check its status, retrieve results, or cancel it.
     ///
-    /// **Note:** Requires [`http_url()`](SpiceClientBuilder::http_url) to be configured.
+    /// Addresses the client's HTTP endpoint, which defaults to the runtime that serves
+    /// the configured Flight endpoint. [`http_url()`](SpiceClientBuilder::http_url)
+    /// overrides it.
     ///
     /// # Example
     ///
@@ -515,7 +502,9 @@ impl SpiceClient {
     /// This is a convenience method equivalent to calling [`get_query()`](Self::get_query)
     /// followed by [`QueryJob::cancel()`].
     ///
-    /// **Note:** Requires [`http_url()`](SpiceClientBuilder::http_url) to be configured.
+    /// Addresses the client's HTTP endpoint, which defaults to the runtime that serves
+    /// the configured Flight endpoint. [`http_url()`](SpiceClientBuilder::http_url)
+    /// overrides it.
     ///
     /// # Example
     ///
@@ -567,7 +556,9 @@ impl SpiceClient {
     /// client: every client presenting the same credential sees the same queries.
     /// See [`active_query`](crate::active_query) for the full boundary.
     ///
-    /// **Note:** Requires [`http_url()`](SpiceClientBuilder::http_url) to be configured.
+    /// Addresses the client's HTTP endpoint, which defaults to the runtime that serves
+    /// the configured Flight endpoint. [`http_url()`](SpiceClientBuilder::http_url)
+    /// overrides it.
     ///
     /// # Example
     ///
@@ -612,7 +603,9 @@ impl SpiceClient {
     /// client: any client presenting the same credential can cancel the query, while
     /// an id outside that scope is reported as not found rather than cancelled.
     ///
-    /// **Note:** Requires [`http_url()`](SpiceClientBuilder::http_url) to be configured.
+    /// Addresses the client's HTTP endpoint, which defaults to the runtime that serves
+    /// the configured Flight endpoint. [`http_url()`](SpiceClientBuilder::http_url)
+    /// overrides it.
     ///
     /// # Example
     ///
@@ -655,7 +648,9 @@ impl SpiceClient {
 
     /// Triggers an on-demand refresh for an accelerated dataset.
     ///
-    /// **Note:** Requires [`http_url()`](SpiceClientBuilder::http_url) to be configured.
+    /// Addresses the client's HTTP endpoint, which defaults to the runtime that serves
+    /// the configured Flight endpoint. [`http_url()`](SpiceClientBuilder::http_url)
+    /// overrides it.
     ///
     /// ```no_run
     /// # use spiceai::ClientBuilder;
@@ -681,7 +676,9 @@ impl SpiceClient {
 
     /// Triggers an on-demand refresh for an accelerated dataset with overrides.
     ///
-    /// **Note:** Requires [`http_url()`](SpiceClientBuilder::http_url) to be configured.
+    /// Addresses the client's HTTP endpoint, which defaults to the runtime that serves
+    /// the configured Flight endpoint. [`http_url()`](SpiceClientBuilder::http_url)
+    /// overrides it.
     pub async fn refresh_dataset_with_options(
         &self,
         dataset_name: &str,
@@ -703,7 +700,9 @@ impl SpiceClient {
     /// for how to configure them. Adding keywords to the request turns this
     /// into a hybrid search, combining a lexical pass with the vector scores.
     ///
-    /// **Note:** Requires [`http_url()`](SpiceClientBuilder::http_url) to be configured.
+    /// Addresses the client's HTTP endpoint, which defaults to the runtime that serves
+    /// the configured Flight endpoint. [`http_url()`](SpiceClientBuilder::http_url)
+    /// overrides it.
     ///
     /// # Example
     ///
@@ -753,7 +752,9 @@ impl SpiceClient {
     /// [Text to SQL](https://docs.spice.ai/features/text-to-sql) for how to
     /// configure one.
     ///
-    /// **Note:** Requires [`http_url()`](SpiceClientBuilder::http_url) to be configured.
+    /// Addresses the client's HTTP endpoint, which defaults to the runtime that serves
+    /// the configured Flight endpoint. [`http_url()`](SpiceClientBuilder::http_url)
+    /// overrides it.
     ///
     /// # Example
     ///
@@ -799,7 +800,9 @@ impl SpiceClient {
     /// through [`query`](Self::query) or the Flight path so results arrive as
     /// Arrow rather than decoded JSON.
     ///
-    /// **Note:** Requires [`http_url()`](SpiceClientBuilder::http_url) to be configured.
+    /// Addresses the client's HTTP endpoint, which defaults to the runtime that serves
+    /// the configured Flight endpoint. [`http_url()`](SpiceClientBuilder::http_url)
+    /// overrides it.
     ///
     /// # Example
     ///
@@ -841,7 +844,9 @@ impl SpiceClient {
     /// model. Use it to see why a generated query was wrong, or to reuse the
     /// runtime's schema context in a prompt of your own.
     ///
-    /// **Note:** Requires [`http_url()`](SpiceClientBuilder::http_url) to be configured.
+    /// Addresses the client's HTTP endpoint, which defaults to the runtime that serves
+    /// the configured Flight endpoint. [`http_url()`](SpiceClientBuilder::http_url)
+    /// overrides it.
     ///
     /// # Example
     ///
@@ -882,7 +887,9 @@ impl SpiceClient {
     /// boolean for the whole runtime, this reports `http`, `flight`, `metrics` and
     /// `opentelemetry` individually, so it can say *which* component is not ready.
     ///
-    /// **Note:** Requires [`http_url()`](SpiceClientBuilder::http_url) to be configured.
+    /// Addresses the client's HTTP endpoint, which defaults to the runtime that serves
+    /// the configured Flight endpoint. [`http_url()`](SpiceClientBuilder::http_url)
+    /// overrides it.
     ///
     /// ```no_run
     /// # use spiceai::ClientBuilder;
@@ -913,7 +920,9 @@ impl SpiceClient {
     /// Backed by `GET /v1/ready`. Returns `Ok(false)` when the runtime responds that it
     /// is not ready; an `Err` means the probe itself could not be completed.
     ///
-    /// **Note:** Requires [`http_url()`](SpiceClientBuilder::http_url) to be configured.
+    /// Addresses the client's HTTP endpoint, which defaults to the runtime that serves
+    /// the configured Flight endpoint. [`http_url()`](SpiceClientBuilder::http_url)
+    /// overrides it.
     pub async fn is_ready(&self) -> Result<bool, StatusError> {
         let http_client = self
             .http_client
@@ -954,6 +963,19 @@ impl SpiceClient {
 /// # }
 /// ```
 ///
+/// The HTTP endpoint that belongs with a Flight endpoint.
+///
+/// A client pointed at Spice Cloud's Flight endpoint reaches Spice Cloud's HTTP API;
+/// anything else — the local runtime, a self-hosted deployment — is served by the
+/// runtime's own HTTP API, which is `http://localhost:8090` by default.
+fn default_http_url_for(flight_url: &str) -> &'static str {
+    if flight_url == SPICE_CLOUD_FLIGHT_ADDR {
+        SPICE_CLOUD_HTTP_ADDR
+    } else {
+        SPICE_LOCAL_HTTP_ADDR
+    }
+}
+
 pub struct SpiceClientBuilder {
     api_key: Option<String>,
     user_agent: Option<String>,
@@ -1101,7 +1123,17 @@ impl SpiceClientBuilder {
         }
         let flight_channel = channel_builder.build().await?;
 
-        let http_client = if let Some(url) = self.http_url {
+        // The HTTP endpoint follows the Flight endpoint unless it was named outright:
+        // one runtime serves both, so deriving it here is what keeps the HTTP-backed
+        // methods usable on a client that only said where the runtime is. Resolved
+        // after the options are applied, so `use_spiceai_cloud()` and `http_url()` can
+        // arrive in either order.
+        let http_url = self
+            .http_url
+            .clone()
+            .unwrap_or_else(|| default_http_url_for(url).to_string());
+
+        let http_client = {
             // Built from the shared helper so the API key cannot follow a redirect off the
             // origin it was configured for (#12502).
             let mut builder = crate::redirect::credentialed_client_builder();
@@ -1120,11 +1152,9 @@ impl SpiceClientBuilder {
             }
             Some(Arc::new(QueryHttpClient::with_client(
                 builder.build()?,
-                &url,
+                &http_url,
                 self.api_key.clone(),
             )))
-        } else {
-            None
         };
 
         Ok(SpiceClient {
@@ -2403,6 +2433,61 @@ mod tests {
                 job.results().await.is_err(),
                 "results accepted the id {id:?}"
             );
+        }
+    }
+
+    // A client that knows where the runtime's Flight endpoint is also knows where its
+    // HTTP endpoint is: one runtime serves both. Leaving the HTTP half unset turned
+    // every HTTP-backed method — is_ready, runtime_status, refresh_dataset, search,
+    // nsql, and the async query APIs — into an error on the default local client.
+    #[tokio::test]
+    async fn build_defaults_the_http_endpoint_to_the_local_runtime() {
+        let client = SpiceClientBuilder::new()
+            .build()
+            .await
+            .expect("the local default builds a client");
+
+        let http = client
+            .http_client
+            .as_ref()
+            .expect("the default client can reach the runtime's HTTP API");
+        assert_eq!(http.base_url(), SPICE_LOCAL_HTTP_ADDR);
+    }
+
+    #[tokio::test]
+    async fn use_spiceai_cloud_moves_the_http_endpoint_too() {
+        let client = SpiceClientBuilder::new()
+            .api_key("API_KEY")
+            .use_spiceai_cloud()
+            .build()
+            .await
+            .expect("the cloud default builds a client");
+
+        let http = client
+            .http_client
+            .as_ref()
+            .expect("a cloud client can reach the HTTP API");
+        assert_eq!(http.base_url(), SPICE_CLOUD_HTTP_ADDR);
+    }
+
+    #[tokio::test]
+    async fn http_url_wins_over_the_derived_default() {
+        for client in [
+            SpiceClientBuilder::new()
+                .use_spiceai_cloud()
+                .http_url("http://runtime.example:8090")
+                .build()
+                .await
+                .expect("builds"),
+            SpiceClientBuilder::new()
+                .http_url("http://runtime.example:8090")
+                .use_spiceai_cloud()
+                .build()
+                .await
+                .expect("builds"),
+        ] {
+            let http = client.http_client.as_ref().expect("http client");
+            assert_eq!(http.base_url(), "http://runtime.example:8090");
         }
     }
 

@@ -1,7 +1,16 @@
 pub const SPICE_CLOUD_FLIGHT_ADDR: &str = "https://flight.spiceai.io";
 
+/// The HTTP API that belongs with [`SPICE_CLOUD_FLIGHT_ADDR`].
+pub const SPICE_CLOUD_HTTP_ADDR: &str = "https://data.spiceai.io";
+
 // default address for local spice runtime
 pub const SPICE_LOCAL_FLIGHT_ADDR: &str = "http://localhost:50051";
+
+/// The HTTP API that belongs with [`SPICE_LOCAL_FLIGHT_ADDR`].
+///
+/// One runtime serves both, so a client that knows where to send Flight queries
+/// knows where to send `/v1/*` requests as well.
+pub const SPICE_LOCAL_HTTP_ADDR: &str = "http://localhost:8090";
 
 pub type GenericError = Box<dyn std::error::Error + Send + Sync>;
 
