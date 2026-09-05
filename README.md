@@ -113,7 +113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 ### Async query jobs and dataset refresh
 
-Async query management and dataset refresh use the Spice HTTP API, so configure `http_url()` in addition to the Flight endpoint when needed.
+Async query management and dataset refresh use the Spice HTTP API. The client pairs it with the Flight endpoint for the two endpoints it knows — the local runtime and Spice Cloud — so neither needs extra configuration. Any other Flight endpoint has no known HTTP counterpart, so a self-hosted runtime still needs `http_url()`, which also overrides the paired default.
 
 ```rust,no_run
 use spiceai::{ClientBuilder, DatasetRefreshMode, DatasetRefreshRequest};
@@ -121,7 +121,6 @@ use spiceai::{ClientBuilder, DatasetRefreshMode, DatasetRefreshRequest};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
   let client = ClientBuilder::new()
-    .http_url("http://localhost:8090")
     .build()
     .await?;
 
@@ -148,7 +147,6 @@ use spiceai::{ClientBuilder, QueryParameters, QuerySubmitOptions};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
   let client = ClientBuilder::new()
-    .http_url("http://localhost:8090")
     .build()
     .await?;
 
@@ -176,7 +174,7 @@ The runtime does not hand a query's id back to the client that submitted it, so 
 
 Two boundaries apply, and a query is reachable only inside both.
 
-**One runtime instance.** The runtime tracks active synchronous queries in memory, per instance, and these endpoints report only what the instance answering them knows. A `Client` configures its Flight and HTTP endpoints independently, so behind a load balancer the query submitted over Flight may be running on a different instance than the one answering here — it will not be listed, and its id reports as not found. Point `http_url()` at the instance running the query.
+**One runtime instance.** The runtime tracks active synchronous queries in memory, per instance, and these endpoints report only what the instance answering them knows. A `Client`'s HTTP endpoint is paired with its Flight endpoint but resolves separately, so behind a load balancer the query submitted over Flight may be running on a different instance than the one answering here — it will not be listed, and its id reports as not found. Point `http_url()` at the instance running the query.
 
 **One authenticated principal**, not a `Client` instance. The principal is whatever credential the runtime authenticates — an API key or a client certificate — so every client presenting the same credential lists and cancels the same queries. Only requests for which the runtime establishes no principal at all share the `public` scope. A query outside the caller's scope is reported as if it did not exist.
 
@@ -188,7 +186,6 @@ use spiceai::ClientBuilder;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
   let client = ClientBuilder::new()
-    .http_url("http://localhost:8090")
     .build()
     .await?;
 
@@ -212,7 +209,7 @@ To cancel an *async query job* instead, use `cancel_query()` — see [Async quer
 
 ### Search
 
-`search` finds documents similar to a piece of text using the runtime's `/v1/search` endpoint. It runs against datasets that have an embedding column and a loaded embedding model — see [Search & Retrieval](https://docs.spice.ai/features/search-and-retrieval) for how to configure them. Like dataset refresh, it uses the HTTP API, so `http_url()` must be configured.
+`search` finds documents similar to a piece of text using the runtime's `/v1/search` endpoint. It runs against datasets that have an embedding column and a loaded embedding model — see [Search & Retrieval](https://docs.spice.ai/features/search-and-retrieval) for how to configure them. Like dataset refresh, it uses the HTTP API, which the client addresses alongside the Flight endpoint.
 
 ```rust,no_run
 use spiceai::{ClientBuilder, SearchRequest};
@@ -220,7 +217,6 @@ use spiceai::{ClientBuilder, SearchRequest};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
   let client = ClientBuilder::new()
-    .http_url("http://localhost:8090")
     .build()
     .await?;
 
@@ -258,7 +254,6 @@ use spiceai::{ClientBuilder, NsqlRequest};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
   let client = ClientBuilder::new()
-    .http_url("http://localhost:8090")
     .build()
     .await?;
 
@@ -290,7 +285,6 @@ use spiceai::{ClientBuilder, NsqlRequest, StreamExt};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
   let client = ClientBuilder::new()
-    .http_url("http://localhost:8090")
     .build()
     .await?;
 
@@ -321,7 +315,6 @@ use spiceai::{ClientBuilder, NsqlContextRequest};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
   let client = ClientBuilder::new()
-    .http_url("http://localhost:8090")
     .build()
     .await?;
 
@@ -346,7 +339,7 @@ and `with_examples_limit()` cap rows per dataset, up to `NSQL_CONTEXT_MAX_LIMIT`
 
 `is_ready()` is a single boolean for the whole runtime. When you need to know *which*
 component is not ready, `runtime_status()` reports each connection separately. Both use
-the HTTP API, so configure `http_url()`.
+the HTTP API.
 
 ```rust,no_run
 use spiceai::ClientBuilder;
@@ -354,7 +347,6 @@ use spiceai::ClientBuilder;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
   let client = ClientBuilder::new()
-    .http_url("http://localhost:8090")
     .build()
     .await?;
 
