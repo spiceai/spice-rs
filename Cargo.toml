@@ -20,7 +20,7 @@ bytes = "1.6.0"
 prost = { version = "0.14.1", features = ["derive"] }
 prost-types = "0.14.1"
 rustls = "0.23.5"
-tokio = { version = "1.37.0", features = ["rt-multi-thread", "fs"] }
+tokio = { version = "1.37.0", features = ["rt-multi-thread", "fs", "sync"] }
 rustls-native-certs = "0.8.1"
 tonic = { version = "0.14", default-features = false, features = [
   "transport",
@@ -45,4 +45,5 @@ winver = "1.0.0"
 
 [dev-dependencies]
 regex = "1.10.6"
+tokio = { version = "1.37.0", features = ["macros", "net"] }
 wiremock = "0.6.5"

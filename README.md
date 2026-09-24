@@ -111,6 +111,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 ```
 
+The client authenticates once. The runtime answers the first query's handshake with a session, and every later query, parameterized queries included, is sent under that session rather than paying a handshake of its own. When the runtime no longer recognises the session, after an hour of inactivity or a restart, the next query renews it and proceeds; a credential the runtime refuses outright is reported, not retried.
+
 ### Async query jobs and dataset refresh
 
 Async query management and dataset refresh use the Spice HTTP API. The client pairs it with the Flight endpoint for the two endpoints it knows — the local runtime and Spice Cloud — so neither needs extra configuration. Any other Flight endpoint has no known HTTP counterpart, so a self-hosted runtime still needs `http_url()`, which also overrides the paired default.

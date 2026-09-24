@@ -23,9 +23,33 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::PoisonError;
 use tonic::IntoRequest;
 use tonic::metadata::AsciiMetadataKey;
 use tonic::transport::Channel;
+
+/// What the runtime answered on the client's most recent handshake.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Session {
+    /// No handshake has completed yet -- or one is in flight, which a reader cannot
+    /// tell apart from here: `handshake_gate` is what distinguishes them, so a burst
+    /// must take it rather than act on `Pending` alone.
+    Pending,
+    /// A handshake completed. The runtime issues a bearer token when it authenticated
+    /// the credential, and none when it runs without authentication.
+    Established(Option<Arc<str>>),
+}
+
+/// The credential a request is sent under.
+struct Credential {
+    /// The bearer token, or none when the runtime issued no token or no api key is
+    /// configured.
+    token: Option<Arc<str>>,
+    /// Whether the token was reused from an earlier handshake. Only a reused token can
+    /// have expired, so only a reused token is worth renewing when the runtime rejects it.
+    reused: bool,
+}
 
 #[derive(Clone)]
 pub struct SqlFlightClient {
@@ -33,6 +57,14 @@ pub struct SqlFlightClient {
     client: FlightServiceClient<Channel>,
     api_key: Option<Arc<str>>,
     max_retries: u32,
+    /// The session the runtime issued for `api_key`, shared by every clone of this
+    /// client so a retry or a concurrent query reuses it rather than handshaking again.
+    session: Arc<Mutex<Session>>,
+    /// Serializes the handshake itself, so a burst of queries that all find no session
+    /// shares one round trip rather than each opening its own. Take it before `session`
+    /// and never the other way round: it is held across the handshake, which is why it is
+    /// async, whereas `session` is only ever held to read or replace it.
+    handshake_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl SqlFlightClient {
@@ -61,6 +93,8 @@ impl SqlFlightClient {
             headers: Arc::new(headers),
             client: FlightServiceClient::new(chan),
             max_retries,
+            session: Arc::new(Mutex::new(Session::Pending)),
+            handshake_gate: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -102,21 +136,112 @@ impl SqlFlightClient {
         Ok(token)
     }
 
-    async fn authenticate(&self) -> std::result::Result<Option<String>, GenericError> {
+    fn cached_session(&self) -> Session {
+        self.session
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Call this under `handshake_gate`. Today `authenticate` is the only caller and
+    /// holds it; a second writer that does not would reinstate a handshake per query in
+    /// a burst, with nothing to fail on it.
+    fn store_session(&self, token: Option<Arc<str>>) {
+        *self.session.lock().unwrap_or_else(PoisonError::into_inner) = Session::Established(token);
+    }
+
+    /// Forgets `stale`, unless another request has already replaced it: a renewal that
+    /// raced this one must not be thrown away for a third handshake.
+    fn forget_session(&self, stale: Option<&Arc<str>>) {
+        let mut session = self.session.lock().unwrap_or_else(PoisonError::into_inner);
+        if matches!(&*session, Session::Established(current) if current.as_ref() == stale) {
+            *session = Session::Pending;
+        }
+    }
+
+    /// Resolves the credential to send a request under, handshaking only when no
+    /// session is established yet.
+    ///
+    /// The runtime answers the handshake with a session token and keeps that session
+    /// for an hour of inactivity, so one handshake serves every query a client makes
+    /// rather than each one paying a round trip of its own.
+    ///
+    /// Queries that start together share that handshake rather than each opening one:
+    /// reading `session` releases it before the round trip, so without `handshake_gate`
+    /// every query in a client's first burst would see `Pending` and handshake, and every
+    /// query in a burst that finds the session expired would renew it separately. A
+    /// handshake that *fails* is serialized by the same gate rather than retried in
+    /// parallel, which is the cost of the guarantee.
+    async fn authenticate(&self) -> std::result::Result<Credential, GenericError> {
         let (username, password) = match &self.api_key {
             Some(api_key) => ("", api_key.as_ref()),
-            None => return Ok(None),
+            None => {
+                return Ok(Credential {
+                    token: None,
+                    reused: false,
+                });
+            }
         };
 
-        let token = self.handshake(username, password).await?;
+        if let Session::Established(token) = self.cached_session() {
+            return Ok(Credential {
+                token,
+                reused: true,
+            });
+        }
 
-        Ok(token)
+        let _handshaking = self.handshake_gate.lock().await;
+
+        // Not `reused`: this token was issued while the call waited on the gate, so it
+        // cannot have expired, and renewing on its rejection would answer a credential
+        // the runtime refuses with a second handshake.
+        if let Session::Established(token) = self.cached_session() {
+            return Ok(Credential {
+                token,
+                reused: false,
+            });
+        }
+
+        let token: Option<Arc<str>> = self.handshake(username, password).await?.map(Arc::from);
+        self.store_session(token.clone());
+
+        Ok(Credential {
+            token,
+            reused: false,
+        })
+    }
+
+    /// Runs `request` under the client's session, renewing the session once when the
+    /// runtime no longer recognises a reused token.
+    ///
+    /// A session outlives neither an hour of inactivity nor a runtime restart, and a
+    /// client that outlives either is answered `UNAUTHENTICATED` until it handshakes
+    /// again. A token this call has just obtained cannot have expired, so its rejection
+    /// is returned as is: renewing it would turn a credential the runtime refuses into
+    /// a loop of handshakes.
+    async fn with_session<F, Fut>(
+        &self,
+        request: F,
+    ) -> std::result::Result<FlightRecordBatchStream, GenericError>
+    where
+        F: Fn(Option<Arc<str>>) -> Fut,
+        Fut: Future<Output = std::result::Result<FlightRecordBatchStream, GenericError>>,
+    {
+        let credential = self.authenticate().await?;
+        match request(credential.token.clone()).await {
+            Err(error) if credential.reused && is_unauthenticated(&error) => {
+                self.forget_session(credential.token.as_ref());
+                let renewed = self.authenticate().await?;
+                request(renewed.token).await
+            }
+            result => result,
+        }
     }
 
     fn set_request_headers<T>(
         &self,
         mut req: tonic::Request<T>,
-        token: Option<String>,
+        token: Option<&str>,
     ) -> Result<tonic::Request<T>, ArrowError> {
         for (k, v) in self.headers.iter() {
             let k = AsciiMetadataKey::from_str(k.as_str()).map_err(|e| {
@@ -140,17 +265,24 @@ impl SqlFlightClient {
         &self,
         query: &str,
     ) -> std::result::Result<FlightRecordBatchStream, GenericError> {
-        let token = self.authenticate().await?;
+        self.with_session(|token| self.execute_statement(query, token))
+            .await
+    }
 
+    async fn execute_statement(
+        &self,
+        query: &str,
+        token: Option<Arc<str>>,
+    ) -> std::result::Result<FlightRecordBatchStream, GenericError> {
         let descriptor = FlightDescriptor::new_cmd(query.to_string());
-        let req = self.set_request_headers(descriptor.into_request(), token.clone())?;
+        let req = self.set_request_headers(descriptor.into_request(), token.as_deref())?;
 
         let info = self.client.clone().get_flight_info(req).await?.into_inner();
 
         for ep in info.endpoint {
             if let Some(tkt) = ep.ticket {
                 let req = tkt.into_request();
-                let req = self.set_request_headers(req, token.clone())?;
+                let req = self.set_request_headers(req, token.as_deref())?;
                 let (md, response_stream, _ext) =
                     self.client.clone().do_get(req).await?.into_parts();
 
@@ -168,10 +300,14 @@ impl SqlFlightClient {
         query: &str,
         params: Option<RecordBatch>,
     ) -> std::result::Result<FlightRecordBatchStream, GenericError> {
-        if let Some(params) = params {
-            Ok(self.execute_prepared_statement(query, params).await?)
-        } else {
-            Ok(self.query(query).await?)
+        match params {
+            Some(params) => {
+                self.with_session(|token| {
+                    self.execute_prepared_statement(query, params.clone(), token)
+                })
+                .await
+            }
+            None => self.query(query).await,
         }
     }
 
@@ -179,8 +315,17 @@ impl SqlFlightClient {
         &self,
         query: &str,
         parameters: RecordBatch,
+        token: Option<Arc<str>>,
     ) -> std::result::Result<FlightRecordBatchStream, GenericError> {
         let mut client = FlightSqlServiceClient::new_from_inner(self.client.clone());
+        // The Flight SQL client sends only the headers it is given, so the session and
+        // the user agent have to reach it the same way they reach a plain query.
+        for (key, value) in self.headers.iter() {
+            client.set_header(key, value);
+        }
+        if let Some(token) = token {
+            client.set_token(token.to_string());
+        }
         let mut prepared_stmt = client.prepare(query.to_string(), None).await?;
 
         prepared_stmt.set_parameters(parameters)?;
@@ -202,6 +347,21 @@ impl SqlFlightClient {
             .await?;
         Ok(stream)
     }
+}
+
+/// Whether the runtime refused the credential a request was sent under.
+///
+/// A plain query surfaces the status itself; the Flight SQL client boxes it inside a
+/// `FlightError`.
+fn is_unauthenticated(error: &GenericError) -> bool {
+    let status = if let Some(status) = error.downcast_ref::<tonic::Status>() {
+        status
+    } else if let Some(FlightError::Tonic(status)) = error.downcast_ref::<FlightError>() {
+        status.as_ref()
+    } else {
+        return false;
+    };
+    status.code() == tonic::Code::Unauthenticated
 }
 
 /// Represents the current state of the `RetryableQueryStream` state machine.
@@ -613,6 +773,115 @@ mod tests {
         let rendered = error.to_string();
         assert!(rendered.starts_with("Can't handshake: "), "{rendered}");
         assert!(rendered.contains("transport error"), "{rendered}");
+    }
+
+    /// The renewal has to key on the code alone: the runtime phrases the rejection
+    /// differently for a missing header, a malformed one and an unknown session.
+    #[test]
+    fn test_unauthenticated_is_recognised_under_both_error_shapes() {
+        for message in [
+            "Missing authorization header",
+            "Invalid authorization header",
+            "Invalid credentials",
+        ] {
+            let plain: GenericError = Box::new(tonic::Status::unauthenticated(message));
+            assert!(is_unauthenticated(&plain), "{message}");
+
+            let boxed: GenericError = Box::new(FlightError::Tonic(Box::new(
+                tonic::Status::unauthenticated(message),
+            )));
+            assert!(is_unauthenticated(&boxed), "{message}");
+        }
+    }
+
+    /// Anything but a refused credential must not cost a handshake, a permission
+    /// failure and a handshake failure included.
+    #[test]
+    fn test_other_failures_are_not_unauthenticated() {
+        let errors: Vec<GenericError> = vec![
+            Box::new(tonic::Status::permission_denied(
+                "app is not visible to this key",
+            )),
+            Box::new(tonic::Status::unavailable("tcp connect error")),
+            Box::new(tonic::Status::invalid_argument("bad sql")),
+            Box::new(FlightError::Tonic(Box::new(tonic::Status::not_found(
+                "no such table",
+            )))),
+            Box::new(FlightError::ProtocolError(
+                "Invalid credentials".to_string(),
+            )),
+            Box::new(HandshakeError {
+                source: tonic::Status::unauthenticated("Invalid credentials"),
+            }),
+            "Invalid credentials".into(),
+        ];
+        for error in errors {
+            assert!(!is_unauthenticated(&error), "{error}");
+        }
+    }
+
+    fn client_with_api_key() -> SqlFlightClient {
+        use tonic::transport::channel::Endpoint;
+
+        SqlFlightClient::new(
+            Endpoint::from_static("http://127.0.0.1:1").connect_lazy(),
+            Some("an-api-key".to_string()),
+            None,
+            None,
+            1,
+        )
+    }
+
+    /// Forgetting a session is scoped to the token that was rejected, so a renewal
+    /// another request has already completed is kept rather than discarded for a third
+    /// handshake.
+    #[tokio::test]
+    async fn test_forget_session_keeps_a_session_another_request_renewed() {
+        let client = client_with_api_key();
+        let stale: Arc<str> = Arc::from("session-1");
+        let renewed: Arc<str> = Arc::from("session-2");
+
+        client.store_session(Some(Arc::clone(&stale)));
+        client.forget_session(Some(&stale));
+        assert_eq!(client.cached_session(), Session::Pending);
+
+        client.store_session(Some(Arc::clone(&renewed)));
+        client.forget_session(Some(&stale));
+        assert_eq!(
+            client.cached_session(),
+            Session::Established(Some(renewed)),
+            "a session renewed by another request must survive a stale rejection"
+        );
+    }
+
+    /// A runtime that runs without authentication answers the handshake with no token;
+    /// that answer is still a session, and must not be handshaken again per query.
+    #[tokio::test]
+    async fn test_a_tokenless_handshake_is_an_established_session() {
+        let client = client_with_api_key();
+        client.store_session(None);
+        assert_eq!(client.cached_session(), Session::Established(None));
+        client.forget_session(None);
+        assert_eq!(client.cached_session(), Session::Pending);
+    }
+
+    /// Without an api key there is nothing to handshake with, so a rejection is not
+    /// something a renewal could fix.
+    #[tokio::test]
+    async fn test_no_api_key_yields_no_renewable_credential() {
+        use tonic::transport::channel::Endpoint;
+
+        let client = SqlFlightClient::new(
+            Endpoint::from_static("http://127.0.0.1:1").connect_lazy(),
+            None,
+            None,
+            None,
+            1,
+        );
+        let credential = client.authenticate().await.expect("no handshake needed");
+        assert!(credential.token.is_none());
+        assert!(!credential.reused);
+        assert_eq!(client.cached_session(), Session::Pending);
     }
 
     #[test]
