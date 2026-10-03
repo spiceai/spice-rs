@@ -373,6 +373,37 @@ Each `ConnectionDetails` carries the component `name` (`http`, `flight`, `metric
 `Ready`, `Disabled`, `Error`, `Refreshing`, `ShuttingDown` or `NotLoaded`. A status a
 future runtime adds deserializes into `ComponentStatus::Other` rather than failing.
 
+### Bypass the results cache
+
+`cache_control()` sets the `Cache-Control` header the client sends on every request,
+over Flight and over the HTTP API alike. `"no-cache"` makes the runtime answer fresh
+instead of from its results cache — for SQL over Flight, and for `search()` over HTTP.
+
+```rust,no_run
+use spiceai::{ClientBuilder, SearchRequest, StreamExt};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+  let client = ClientBuilder::new()
+    .cache_control("no-cache")
+    .build()
+    .await?;
+
+  // Both requests skip the cache: the SQL over Flight, the search over HTTP.
+  let mut stream = client.sql("SELECT count(*) FROM taxi_trips").await?;
+  while let Some(batch) = stream.next().await {
+    println!("rows: {}", batch?.num_rows());
+  }
+
+  let results = client
+    .search(SearchRequest::new("airport pickups").with_datasets(["taxi_trips"]))
+    .await?;
+  println!("{} fresh matches", results.len());
+
+  Ok(())
+}
+```
+
 ## Documentation
 
 Check out our [Documentation](https://docs.spice.ai/sdks/rust-sdk) to learn more about how to use the Rust SDK.

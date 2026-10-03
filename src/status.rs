@@ -131,7 +131,7 @@ impl QueryHttpClient {
         let url = format!("{}/v1/status", self.base_url());
 
         let response = self
-            .authorized(self.client().get(&url))
+            .with_client_headers(self.client().get(&url))
             .send()
             .await
             .map_err(|e| StatusError::HttpError {
@@ -159,7 +159,7 @@ impl QueryHttpClient {
         let url = format!("{}/v1/ready", self.base_url());
 
         let response = self
-            .authorized(self.client().get(&url))
+            .with_client_headers(self.client().get(&url))
             .send()
             .await
             .map_err(|e| StatusError::HttpError {
