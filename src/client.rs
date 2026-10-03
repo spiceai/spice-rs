@@ -1043,6 +1043,10 @@ impl SpiceClientBuilder {
     }
 
     /// Configures the cache control to use the given cache control policy.
+    ///
+    /// Sent as the `Cache-Control` header on every request, over Flight and over the
+    /// runtime's HTTP API alike — `"no-cache"`, for example, bypasses the results cache for
+    /// SQL over Flight and for [`search()`](SpiceClient::search) over HTTP.
     #[must_use]
     pub fn cache_control(mut self, cache_control: &str) -> Self {
         self.cache_control = Some(cache_control.to_string());
@@ -1155,11 +1159,10 @@ impl SpiceClientBuilder {
                 let ca = reqwest::Certificate::from_pem(&ca_pem)?;
                 builder = builder.add_root_certificate(ca);
             }
-            Some(Arc::new(QueryHttpClient::with_client(
-                builder.build()?,
-                &http_url,
-                self.api_key.clone(),
-            )))
+            Some(Arc::new(
+                QueryHttpClient::with_client(builder.build()?, &http_url, self.api_key.clone())
+                    .with_cache_control(self.cache_control.clone()),
+            ))
         } else {
             None
         };
@@ -1943,6 +1946,99 @@ mod tests {
         // The runtime omits data and primary_key when they are empty.
         assert!(response.results[1].data.is_empty());
         assert!(response.results[1].primary_key.is_empty());
+    }
+
+    // `cache_control` is a client-wide policy, and the runtime reads `Cache-Control` from
+    // HTTP requests as well as Flight ones — `/v1/search` keeps its own results cache and
+    // honours `no-cache`. A client configured `no-cache` must not be served a cached search
+    // over HTTP, so every HTTP request carries the policy, as every Flight request does.
+    #[tokio::test]
+    async fn cache_control_reaches_the_http_api() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/search"))
+            .and(header("cache-control", "no-cache"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"results": [], "duration_ms": 1})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/nsql"))
+            .and(header("cache-control", "no-cache"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "row_count": 0,
+                "schema": {"fields": []},
+                "data": [],
+                "sql": "SELECT 1"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/queries"))
+            .and(header("cache-control", "no-cache"))
+            .respond_with(ResponseTemplate::new(202).set_body_json(json!({
+                "query_id": "q-1",
+                "status": "PENDING",
+                "status_url": "/v1/queries/q-1/status",
+                "results_url": "/v1/queries/q-1/results"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = SpiceClientBuilder::new()
+            .http_url(&server.uri())
+            .cache_control("no-cache")
+            .build()
+            .await
+            .expect("builds");
+
+        client
+            .search(SearchRequest::new("tokyo").with_datasets(["app_messages"]))
+            .await
+            .expect("search carries the cache policy");
+        client
+            .nsql(NsqlRequest::new("how many orders"))
+            .await
+            .expect("nsql carries the cache policy");
+        client
+            .query("SELECT 1")
+            .await
+            .expect("an async query carries the cache policy");
+    }
+
+    // With no policy configured the client must not invent one: the runtime's default
+    // caching applies, exactly as it does over Flight.
+    #[tokio::test]
+    async fn no_cache_control_is_sent_unless_configured() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/search"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"results": [], "duration_ms": 1})),
+            )
+            .mount(&server)
+            .await;
+
+        let client = SpiceClientBuilder::new()
+            .http_url(&server.uri())
+            .build()
+            .await
+            .expect("builds");
+        client
+            .search(SearchRequest::new("tokyo").with_datasets(["app_messages"]))
+            .await
+            .expect("search succeeds");
+
+        let requests = server.received_requests().await.expect("recording is on");
+        assert_eq!(requests.len(), 1);
+        assert!(
+            !requests[0].headers.contains_key("cache-control"),
+            "sent an unconfigured Cache-Control: {:?}",
+            requests[0].headers.get("cache-control")
+        );
     }
 
     #[tokio::test]

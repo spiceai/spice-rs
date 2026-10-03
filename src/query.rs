@@ -477,6 +477,7 @@ pub(crate) struct QueryHttpClient {
     client: reqwest::Client,
     base_url: String,
     api_key: Option<String>,
+    cache_control: Option<String>,
 }
 
 impl QueryHttpClient {
@@ -504,7 +505,16 @@ impl QueryHttpClient {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key,
+            cache_control: None,
         }
+    }
+
+    /// Sends `cache_control` as the `Cache-Control` header on every request, matching the
+    /// Flight client: the runtime reads it from HTTP requests too.
+    #[must_use]
+    pub fn with_cache_control(mut self, cache_control: Option<String>) -> Self {
+        self.cache_control = cache_control;
+        self
     }
 
     /// The underlying reqwest client, for request builders constructed in sibling modules.
@@ -517,14 +527,18 @@ impl QueryHttpClient {
         &self.base_url
     }
 
-    /// Applies the configured API key to a request, if one is set.
-    pub(crate) fn authorized(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        self.add_auth(req)
-    }
-
-    fn add_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        match &self.api_key {
+    /// Applies the client-wide headers — the API key and cache policy, each if set — to a
+    /// request.
+    pub(crate) fn with_client_headers(
+        &self,
+        req: reqwest::RequestBuilder,
+    ) -> reqwest::RequestBuilder {
+        let req = match &self.api_key {
             Some(key) => req.header("X-API-Key", key),
+            None => req,
+        };
+        match &self.cache_control {
+            Some(cache_control) => req.header(reqwest::header::CACHE_CONTROL, cache_control),
             None => req,
         }
     }
@@ -579,7 +593,7 @@ impl QueryHttpClient {
         };
 
         let response = self
-            .add_auth(self.client.post(url))
+            .with_client_headers(self.client.post(url))
             .json(&body)
             .send()
             .await
@@ -606,7 +620,7 @@ impl QueryHttpClient {
         let url = self.build_url(["v1", "queries", query_id, "status"])?;
 
         let response = self
-            .add_auth(self.client.get(url))
+            .with_client_headers(self.client.get(url))
             .send()
             .await
             .map_err(|e| QueryError::HttpError {
@@ -634,7 +648,7 @@ impl QueryHttpClient {
         let url = self.build_url(["v1", "queries", query_id])?;
 
         let response = self
-            .add_auth(self.client.get(url))
+            .with_client_headers(self.client.get(url))
             .send()
             .await
             .map_err(|e| QueryError::HttpError {
@@ -677,7 +691,7 @@ impl QueryHttpClient {
         ])?;
 
         let response = self
-            .add_auth(self.client.get(url))
+            .with_client_headers(self.client.get(url))
             .send()
             .await
             .map_err(|e| QueryError::HttpError {
@@ -723,7 +737,7 @@ impl QueryHttpClient {
         ])?;
 
         let response = self
-            .add_auth(self.client.get(url))
+            .with_client_headers(self.client.get(url))
             .send()
             .await
             .map_err(|e| QueryError::HttpError {
@@ -761,7 +775,7 @@ impl QueryHttpClient {
         let url = self.build_url(["v1", "queries", query_id, "cancel"])?;
 
         let response = self
-            .add_auth(self.client.post(url))
+            .with_client_headers(self.client.post(url))
             .send()
             .await
             .map_err(|e| QueryError::HttpError {
@@ -794,7 +808,7 @@ impl QueryHttpClient {
         let url = format!("{}/v1/sql/active", self.base_url);
 
         let response = self
-            .add_auth(self.client.get(&url))
+            .with_client_headers(self.client.get(&url))
             .send()
             .await
             .map_err(|e| ActiveQueryError::HttpError {
@@ -852,7 +866,7 @@ impl QueryHttpClient {
         }
 
         let response = self
-            .add_auth(self.client.post(url))
+            .with_client_headers(self.client.post(url))
             .send()
             .await
             .map_err(|e| ActiveQueryError::HttpError {
@@ -906,7 +920,7 @@ impl QueryHttpClient {
             path_segments.push("refresh");
         }
 
-        let request_builder = self.add_auth(self.client.post(url));
+        let request_builder = self.with_client_headers(self.client.post(url));
         let response = if request.has_overrides() {
             request_builder.json(request).send().await
         } else {
@@ -956,7 +970,7 @@ impl QueryHttpClient {
         let url = format!("{}/v1/search", self.base_url);
 
         let response = self
-            .add_auth(self.client.post(&url))
+            .with_client_headers(self.client.post(&url))
             .json(request)
             .send()
             .await
@@ -988,7 +1002,7 @@ impl QueryHttpClient {
         let url = format!("{}/v1/nsql", self.base_url);
 
         let response = self
-            .add_auth(self.client.post(&url))
+            .with_client_headers(self.client.post(&url))
             .header(reqwest::header::ACCEPT, accept)
             .json(request)
             .send()
@@ -1048,7 +1062,7 @@ impl QueryHttpClient {
         let url = format!("{}/v1/nsql/context", self.base_url);
 
         let response = self
-            .add_auth(self.client.get(&url))
+            .with_client_headers(self.client.get(&url))
             .query(&request.query_pairs())
             .header(reqwest::header::ACCEPT, "text/markdown")
             .send()
@@ -1103,7 +1117,7 @@ impl QueryHttpClient {
         }
 
         let response = self
-            .add_auth(self.client.get(&url))
+            .with_client_headers(self.client.get(&url))
             .send()
             .await
             .map_err(|e| QueryError::HttpError {
