@@ -1890,6 +1890,36 @@ mod tests {
         assert_eq!(custom_refresh.message, "Refresh scheduled");
     }
 
+    /// A 200 whose body is not a search response must not read as an empty
+    /// search, and the error should say what was wrong with it.
+    #[tokio::test]
+    async fn test_search_rejects_a_200_that_is_not_a_search_response() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/search"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"error": "upstream timeout"})),
+            )
+            .mount(&server)
+            .await;
+
+        let client = test_client(Some(&server.uri()));
+
+        let err = client
+            .search(SearchRequest::new("tokyo"))
+            .await
+            .expect_err("a body without results is not an empty search");
+
+        match err {
+            SearchError::ParseError { message } => assert!(
+                message.contains("missing field `results`"),
+                "the error should name the missing field: {message:?}"
+            ),
+            other => panic!("expected ParseError, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn test_search_posts_request_and_parses_response() {
         let server = MockServer::start().await;

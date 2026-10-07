@@ -150,16 +150,14 @@ impl SearchRequest {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct SearchMatch {
     /// The dataset the match was found in.
-    #[serde(default)]
     pub dataset: String,
 
     /// The match's similarity to the query. Higher is more similar.
-    #[serde(rename = "_score", default)]
+    #[serde(rename = "_score", alias = "score")]
     pub score: f64,
 
     /// The matched values, keyed by the column they came from. Each value is a
     /// list because one column can contribute several chunks to a single match.
-    #[serde(default)]
     pub matches: HashMap<String, Vec<serde_json::Value>>,
 
     /// The primary key columns identifying the matched row. Empty when the
@@ -180,11 +178,9 @@ pub struct SearchMatch {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct SearchResponse {
     /// The matches, ordered by descending score.
-    #[serde(default)]
     pub results: Vec<SearchMatch>,
 
     /// How long the runtime reported the search took, in milliseconds.
-    #[serde(default)]
     pub duration_ms: u128,
 }
 
@@ -329,5 +325,49 @@ mod tests {
             serde_json::from_str(r#"{"results": [], "duration_ms": 3}"#).expect("deserialize");
         assert!(response.is_empty());
         assert_eq!(response.into_iter().count(), 0);
+    }
+
+    #[test]
+    fn test_malformed_response_is_an_error() {
+        // A 200 whose body is not a search response (schema drift, or a proxy
+        // answering for the runtime) must not read as "zero results in zero
+        // milliseconds", which is indistinguishable from a real empty search.
+        for body in [
+            "{}",
+            r#"{"error": "upstream timeout"}"#,
+            r#"{"duration_ms": 3}"#,
+            r#"{"results": []}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<SearchResponse>(body).is_err(),
+                "{body} should not deserialize as a search response"
+            );
+        }
+    }
+
+    #[test]
+    fn test_malformed_match_is_an_error() {
+        for entry in [
+            r#"{"dataset": "app_messages", "_score": 0.9}"#,
+            r#"{"matches": {"message": ["hi"]}, "_score": 0.9}"#,
+            r#"{"matches": {"message": ["hi"]}, "dataset": "app_messages"}"#,
+            "{}",
+        ] {
+            let body = format!(r#"{{"results": [{entry}], "duration_ms": 3}}"#);
+            assert!(
+                serde_json::from_str::<SearchResponse>(&body).is_err(),
+                "{entry} should not deserialize as a search match"
+            );
+        }
+    }
+
+    #[test]
+    fn test_match_accepts_legacy_score_name() {
+        // Older runtimes serialized the score as `score` rather than `_score`.
+        let response: SearchResponse = serde_json::from_str(
+            r#"{"results": [{"matches": {}, "dataset": "d", "score": 0.5}], "duration_ms": 1}"#,
+        )
+        .expect("deserialize");
+        assert!((response.results[0].score - 0.5).abs() < f64::EPSILON);
     }
 }

@@ -989,7 +989,13 @@ impl QueryHttpClient {
             });
         }
 
-        response.json().await.map_err(|e| SearchError::ParseError {
+        // Decode with serde_json rather than `Response::json`, whose error reads
+        // only "error decoding response body" and drops the serde detail that
+        // names the missing or mistyped field.
+        let body = response.text().await.map_err(|e| SearchError::ParseError {
+            message: format!("the response body could not be read: {e}"),
+        })?;
+        serde_json::from_str(&body).map_err(|e| SearchError::ParseError {
             message: e.to_string(),
         })
     }
