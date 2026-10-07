@@ -991,11 +991,16 @@ impl QueryHttpClient {
 
         // Decode with serde_json rather than `Response::json`, whose error reads
         // only "error decoding response body" and drops the serde detail that
-        // names the missing or mistyped field.
-        let body = response.text().await.map_err(|e| SearchError::ParseError {
-            message: format!("the response body could not be read: {e}"),
-        })?;
-        serde_json::from_str(&body).map_err(|e| SearchError::ParseError {
+        // names the missing or mistyped field. Decode the raw bytes, not
+        // `Response::text`, which replaces invalid UTF-8 with U+FFFD and would
+        // let a malformed body through as a result.
+        let body = response
+            .bytes()
+            .await
+            .map_err(|e| SearchError::ParseError {
+                message: format!("the response body could not be read: {e}"),
+            })?;
+        serde_json::from_slice(&body).map_err(|e| SearchError::ParseError {
             message: e.to_string(),
         })
     }

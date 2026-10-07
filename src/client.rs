@@ -1920,6 +1920,35 @@ mod tests {
         }
     }
 
+    /// A 200 whose body is not valid UTF-8 is a malformed response, not a
+    /// result whose text has been patched with replacement characters.
+    #[tokio::test]
+    async fn test_search_rejects_a_200_that_is_not_utf8() {
+        let server = MockServer::start().await;
+
+        let mut body = br#"{"results":[{"matches":{"message":[""#.to_vec();
+        body.extend_from_slice(&[0xff, 0xfe]);
+        body.extend_from_slice(br#""]},"dataset":"app_messages","_score":0.5}],"duration_ms":1}"#);
+
+        Mock::given(method("POST"))
+            .and(path("/v1/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+            .mount(&server)
+            .await;
+
+        let client = test_client(Some(&server.uri()));
+
+        let err = client
+            .search(SearchRequest::new("tokyo"))
+            .await
+            .expect_err("invalid UTF-8 must not decode into a search result");
+
+        assert!(
+            matches!(err, SearchError::ParseError { .. }),
+            "expected ParseError, got {err:?}"
+        );
+    }
+
     #[tokio::test]
     async fn test_search_posts_request_and_parses_response() {
         let server = MockServer::start().await;
