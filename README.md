@@ -93,7 +93,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 ```
 
-Timestamps, dates, times, and durations bind directly too. A `chrono::DateTime` in any time zone binds as the same UTC instant (`Timestamp(ns, "UTC")`), a `NaiveDateTime` as a timestamp with no time zone, and a `std::time::Duration` or `chrono::TimeDelta` as `Duration(ns)`. Spice compares timestamps in nanoseconds, so a timestamp outside 1677-09-21 to 2262-04-11 (or a duration over about 292 years) is an error from `QueryParameter::try_from`, not a silently wrapped value. `NaiveDate` and `NaiveTime` always fit and use `push` directly. `spiceai::chrono` re-exports the `chrono` version these conversions are written against.
+Timestamps, dates, times, and durations bind directly too. A `chrono::DateTime` in any time zone binds as the same UTC instant (`Timestamp(ns, "UTC")`), a `NaiveDateTime` as a timestamp with no time zone, and a `std::time::Duration` or `chrono::TimeDelta` as `Duration(ns)`. Spice compares timestamps in nanoseconds, so a timestamp outside 1677-09-21 to 2262-04-11 (or a duration over about 292 years) is an error from `QueryParameter::try_from`, not a silently wrapped value. A `NaiveTime` binds as `Time64(ns)` through `QueryParameter::try_from`, which rejects a leap second (23:59:60.x) because `Time64` has no 61st second. A `NaiveDate` always fits and uses `push` directly. `spiceai::chrono` re-exports the `chrono` version these conversions are written against.
 
 ```rust,no_run
 use std::time::Duration;

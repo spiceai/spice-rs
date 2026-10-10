@@ -584,13 +584,31 @@ impl From<Option<NaiveDate>> for QueryParameter {
     }
 }
 
-impl From<NaiveTime> for QueryParameter {
-    /// Binds a time of day as `Time64(Nanosecond)`. Arrow has no leap second,
-    /// so chrono's 23:59:60.x binds as 23:59:59.x.
-    fn from(value: NaiveTime) -> Self {
-        let nanos = i64::from(value.num_seconds_from_midnight()) * 1_000_000_000
-            + i64::from(value.nanosecond() % 1_000_000_000);
-        Self::Array(Arc::new(Time64NanosecondArray::from(vec![nanos])))
+/// Binds a time of day as `Time64(Nanosecond)`.
+///
+/// # Errors
+///
+/// Returns [`QueryParameterError::BatchCreation`] for a leap second
+/// (chrono's 23:59:60.x). `Time64` has no 61st second, and folding it onto
+/// 23:59:59.x would bind a different time than the caller asked for.
+impl TryFrom<NaiveTime> for QueryParameter {
+    type Error = QueryParameterError;
+
+    fn try_from(value: NaiveTime) -> Result<Self, Self::Error> {
+        let subsec = value.nanosecond();
+        if subsec >= 1_000_000_000 {
+            return Err(QueryParameterError::BatchCreation {
+                source: ArrowError::InvalidArgumentError(format!(
+                    "time {value} is a leap second and cannot be bound as a query parameter: \
+                     Time64 has no 61st second"
+                )),
+            });
+        }
+        let nanos =
+            i64::from(value.num_seconds_from_midnight()) * 1_000_000_000 + i64::from(subsec);
+        Ok(Self::Array(Arc::new(Time64NanosecondArray::from(vec![
+            nanos,
+        ]))))
     }
 }
 
@@ -1570,12 +1588,26 @@ mod tests {
                 .value(0)
         };
         let time = NaiveTime::from_hms_nano_opt(13, 30, 15, 7).expect("valid test value");
-        assert_eq!(nanos(time.into()), 48_615_000_000_007);
+        assert_eq!(
+            nanos(QueryParameter::try_from(time).expect("not a leap second")),
+            48_615_000_000_007
+        );
 
+        let last = NaiveTime::from_hms_nano_opt(23, 59, 59, 999_999_999).expect("valid test value");
+        assert_eq!(
+            nanos(QueryParameter::try_from(last).expect("not a leap second")),
+            86_399_999_999_999
+        );
+    }
+
+    #[test]
+    fn naive_time_rejects_a_leap_second_rather_than_binding_another_time() {
         let leap =
             NaiveTime::from_hms_nano_opt(23, 59, 59, 1_500_000_000).expect("valid test value");
-        let last = NaiveTime::from_hms_nano_opt(23, 59, 59, 500_000_000).expect("valid test value");
-        assert_eq!(nanos(leap.into()), nanos(last.into()));
+        let err = QueryParameter::try_from(leap).expect_err("Time64 has no leap second");
+        let message = err.to_string();
+        assert!(message.contains("leap second"), "{message}");
+        assert!(message.contains("23:59:60.5"), "{message}");
     }
 
     #[test]
