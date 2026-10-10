@@ -235,6 +235,126 @@ mod tests {
         };
     }
 
+    /// Runs a `COUNT(*)` query, with `params` bound when given, and returns
+    /// the count.
+    #[cfg(not(target_os = "windows"))]
+    async fn local_count(client: &Client, sql: &str, params: Option<QueryParameters>) -> i64 {
+        let mut stream = match params {
+            Some(params) => client.sql_with_bindings(sql, params).await,
+            None => client.sql(sql).await,
+        }
+        .unwrap_or_else(|e| panic!("{sql}: {e}"));
+        let mut batches = Vec::new();
+        while let Some(batch) = stream.next().await {
+            batches.push(batch.unwrap_or_else(|e| panic!("{sql}: {e}")));
+        }
+        let batch =
+            concat_batches(&batches[0].schema(), &batches).expect("Failed to concat batches");
+        batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .expect("COUNT(*) is Int64")
+            .value(0)
+    }
+
+    /// Each temporal binding must select exactly the rows its SQL literal
+    /// selects, so the runtime accepts the bound Arrow type and casts it to
+    /// the value the conversion promises.
+    // skip on Windows as we do not provide a spice runtime for Windows
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn test_local_temporal_bindings_match_literals() {
+        use spiceai::QueryParameter;
+        use spiceai::chrono::{NaiveDate, NaiveTime, TimeDelta, TimeZone, Utc};
+        use std::time::{Duration, UNIX_EPOCH};
+
+        let _ = rustls::crypto::CryptoProvider::install_default(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        );
+        let client = new_local_client().await;
+
+        let midnight = NaiveDate::from_ymd_opt(2024, 1, 15)
+            .expect("valid date")
+            .and_hms_opt(0, 0, 0)
+            .expect("valid time");
+        let utc_midnight = Utc
+            .with_ymd_and_hms(2024, 1, 15, 0, 0, 0)
+            .single()
+            .expect("an unambiguous instant");
+        let system_midnight = UNIX_EPOCH + Duration::from_secs(1_705_276_800);
+
+        let since = "SELECT COUNT(*) FROM taxi_trips WHERE tpep_pickup_datetime >= ";
+        let trip_longer_than =
+            "SELECT COUNT(*) FROM taxi_trips WHERE tpep_dropoff_datetime - tpep_pickup_datetime > ";
+        let on_day = "SELECT COUNT(*) FROM taxi_trips WHERE CAST(tpep_pickup_datetime AS DATE) = ";
+        let before_time_of_day =
+            "SELECT COUNT(*) FROM taxi_trips WHERE CAST(tpep_pickup_datetime AS TIME) < ";
+
+        let cases: Vec<(&str, &str, &str, QueryParameter)> = vec![
+            (
+                "NaiveDateTime",
+                since,
+                "TIMESTAMP '2024-01-15 00:00:00'",
+                QueryParameter::try_from(midnight).expect("in range"),
+            ),
+            (
+                "DateTime<Utc>",
+                since,
+                "TIMESTAMP '2024-01-15 00:00:00'",
+                QueryParameter::try_from(utc_midnight).expect("in range"),
+            ),
+            (
+                "SystemTime",
+                since,
+                "TIMESTAMP '2024-01-15 00:00:00'",
+                QueryParameter::try_from(system_midnight).expect("in range"),
+            ),
+            (
+                "std::time::Duration",
+                trip_longer_than,
+                "INTERVAL '30 minutes'",
+                QueryParameter::try_from(Duration::from_secs(30 * 60)).expect("in range"),
+            ),
+            (
+                "TimeDelta",
+                trip_longer_than,
+                "INTERVAL '30 minutes'",
+                QueryParameter::try_from(TimeDelta::minutes(30)).expect("in range"),
+            ),
+            (
+                "NaiveDate",
+                on_day,
+                "DATE '2024-01-15'",
+                NaiveDate::from_ymd_opt(2024, 1, 15)
+                    .expect("valid date")
+                    .into(),
+            ),
+            (
+                "NaiveTime",
+                before_time_of_day,
+                "TIME '06:00:00'",
+                QueryParameter::try_from(NaiveTime::from_hms_opt(6, 0, 0).expect("valid time"))
+                    .expect("not a leap second"),
+            ),
+        ];
+
+        for (name, prefix, literal, param) in cases {
+            let expected = local_count(&client, &format!("{prefix}{literal}"), None).await;
+            assert!(
+                expected > 0,
+                "{name}: the literal query selects no rows, so the comparison proves nothing"
+            );
+            let bound = local_count(
+                &client,
+                &format!("{prefix}$1"),
+                Some(QueryParameters::new().push(param)),
+            )
+            .await;
+            assert_eq!(bound, expected, "{name} bound as $1 vs {literal}");
+        }
+    }
+
     // skip on Windows as we do not provide a spice runtime for Windows
     #[cfg(not(target_os = "windows"))]
     #[tokio::test]
