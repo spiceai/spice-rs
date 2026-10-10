@@ -7,7 +7,9 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::error::ArrowError;
 use arrow::record_batch::RecordBatch;
-use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta, TimeZone, Timelike, Utc};
+use chrono::{
+    DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta, TimeZone, Timelike, Utc,
+};
 use snafu::{Snafu, ensure};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -470,8 +472,9 @@ impl<'a> From<Option<&'a [u8]>> for QueryParameter {
     }
 }
 
-/// The Unix epoch as a date, the origin of Arrow's `Date32` day count.
-const UNIX_EPOCH_DATE: NaiveDate = NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid date");
+/// Days from 0001-01-01 (chrono's day 1) to 1970-01-01, the origin of Arrow's
+/// `Date32` day count.
+const UNIX_EPOCH_DAYS_FROM_CE: i32 = 719_163;
 
 const TIMESTAMP_RANGE: &str = "1677-09-21 to 2262-04-11 UTC";
 const DURATION_RANGE: &str = "about 292 years either way";
@@ -553,9 +556,11 @@ impl TryFrom<SystemTime> for QueryParameter {
     fn try_from(value: SystemTime) -> Result<Self, Self::Error> {
         let nanos = match value.duration_since(UNIX_EPOCH) {
             Ok(after) => i64::try_from(after.as_nanos()).ok(),
-            Err(before) => i64::try_from(before.duration().as_nanos())
+            // Negate in i128: `i64::MIN` is a representable instant, but its
+            // magnitude, 2^63, is not a positive `i64`.
+            Err(before) => i128::try_from(before.duration().as_nanos())
                 .ok()
-                .map(|nanos| -nanos),
+                .and_then(|nanos| i64::try_from(-nanos).ok()),
         };
         let nanos = nanos.ok_or_else(|| {
             out_of_nanosecond_range("system time", format_args!("{value:?}"), TIMESTAMP_RANGE)
@@ -565,10 +570,10 @@ impl TryFrom<SystemTime> for QueryParameter {
 }
 
 impl From<NaiveDate> for QueryParameter {
-    /// Binds a calendar date as `Date32`. Every `NaiveDate` fits.
+    /// Binds a calendar date as `Date32`. Every `NaiveDate` fits: chrono's
+    /// day numbers span about ±95 million, far inside `i32`.
     fn from(value: NaiveDate) -> Self {
-        let days = i32::try_from(value.signed_duration_since(UNIX_EPOCH_DATE).num_days())
-            .expect("chrono's date range fits in Date32");
+        let days = value.num_days_from_ce() - UNIX_EPOCH_DAYS_FROM_CE;
         Self::Array(Arc::new(Date32Array::from(vec![days])))
     }
 }
@@ -1397,7 +1402,7 @@ mod tests {
     }
 
     fn single_column(param: QueryParameter) -> ArrayRef {
-        batch_from(QueryParameters::from(param)).column(0).clone()
+        Arc::clone(batch_from(QueryParameters::from(param)).column(0))
     }
 
     fn timestamp_value(column: &ArrayRef) -> i64 {
@@ -1410,11 +1415,15 @@ mod tests {
 
     #[test]
     fn date_time_binds_as_the_same_utc_instant_whatever_its_offset() {
-        let utc = Utc.with_ymd_and_hms(2024, 1, 31, 5, 0, 0).unwrap();
+        let utc = Utc
+            .with_ymd_and_hms(2024, 1, 31, 5, 0, 0)
+            .single()
+            .expect("an unambiguous test instant");
         let eastern = chrono::FixedOffset::west_opt(5 * 3600)
-            .unwrap()
+            .expect("valid test value")
             .with_ymd_and_hms(2024, 1, 31, 0, 0, 0)
-            .unwrap();
+            .single()
+            .expect("an unambiguous test instant");
 
         let from_utc = single_column(QueryParameter::try_from(utc).expect("in range"));
         let from_eastern = single_column(QueryParameter::try_from(eastern).expect("in range"));
@@ -1430,9 +1439,10 @@ mod tests {
     fn date_time_keeps_sub_microsecond_precision() {
         let precise = Utc
             .with_ymd_and_hms(2024, 1, 31, 0, 0, 0)
-            .unwrap()
+            .single()
+            .expect("an unambiguous test instant")
             .with_nanosecond(123_456_789)
-            .unwrap();
+            .expect("valid test value");
         let column = single_column(QueryParameter::try_from(precise).expect("in range"));
         assert_eq!(timestamp_value(&column) % 1_000_000_000, 123_456_789);
     }
@@ -1440,7 +1450,10 @@ mod tests {
     #[test]
     fn date_time_outside_nanosecond_range_is_an_error_not_a_wrapped_value() {
         for year in [1600, 2300] {
-            let instant = Utc.with_ymd_and_hms(year, 1, 1, 0, 0, 0).unwrap();
+            let instant = Utc
+                .with_ymd_and_hms(year, 1, 1, 0, 0, 0)
+                .single()
+                .expect("an unambiguous test instant");
             let err = QueryParameter::try_from(instant).expect_err("out of range");
             let message = err.to_string();
             assert!(message.contains(&format!("{year}-01-01")), "{message}");
@@ -1451,9 +1464,9 @@ mod tests {
     #[test]
     fn naive_date_time_binds_without_a_time_zone() {
         let wall = NaiveDate::from_ymd_opt(2024, 1, 31)
-            .unwrap()
+            .expect("valid test value")
             .and_hms_opt(5, 0, 0)
-            .unwrap();
+            .expect("valid test value");
         let column = single_column(QueryParameter::try_from(wall).expect("in range"));
         assert_eq!(
             column.data_type(),
@@ -1462,15 +1475,16 @@ mod tests {
         assert_eq!(timestamp_value(&column), 1_706_677_200_000_000_000);
 
         let far = NaiveDate::from_ymd_opt(2300, 1, 1)
-            .unwrap()
+            .expect("valid test value")
             .and_hms_opt(0, 0, 0)
-            .unwrap();
+            .expect("valid test value");
         assert!(QueryParameter::try_from(far).is_err());
     }
 
     #[test]
     fn system_time_binds_on_either_side_of_the_epoch() {
-        let after = UNIX_EPOCH + Duration::from_nanos(1_706_677_200_000_000_001);
+        // A multiple of 100 ns, the resolution of a Windows `SystemTime`.
+        let after = UNIX_EPOCH + Duration::from_nanos(1_706_677_200_000_000_100);
         let before = UNIX_EPOCH - Duration::from_secs(86_400);
 
         let after = single_column(QueryParameter::try_from(after).expect("in range"));
@@ -1480,8 +1494,26 @@ mod tests {
             after.data_type(),
             &DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()))
         );
-        assert_eq!(timestamp_value(&after), 1_706_677_200_000_000_001);
+        assert_eq!(timestamp_value(&after), 1_706_677_200_000_000_100);
         assert_eq!(timestamp_value(&before), -86_400_000_000_000);
+    }
+
+    /// Windows clocks tick in 100 ns, so the `i64` nanosecond edges only exist
+    /// as `SystemTime` values on Unix.
+    #[cfg(unix)]
+    #[test]
+    fn system_time_binds_the_whole_nanosecond_range_and_no_further() {
+        let edge = UNIX_EPOCH - Duration::from_nanos(i64::MIN.unsigned_abs());
+        let column = single_column(QueryParameter::try_from(edge).expect("i64::MIN is in range"));
+        assert_eq!(timestamp_value(&column), i64::MIN);
+
+        let past_edge = edge - Duration::from_nanos(1);
+        assert!(QueryParameter::try_from(past_edge).is_err());
+
+        let latest = UNIX_EPOCH + Duration::from_nanos(i64::MAX.unsigned_abs());
+        let column = single_column(QueryParameter::try_from(latest).expect("i64::MAX is in range"));
+        assert_eq!(timestamp_value(&column), i64::MAX);
+        assert!(QueryParameter::try_from(latest + Duration::from_nanos(1)).is_err());
     }
 
     #[test]
@@ -1494,14 +1526,34 @@ mod tests {
                 .value(0)
         };
         assert_eq!(
-            days(NaiveDate::from_ymd_opt(2024, 1, 31).unwrap().into()),
+            days(
+                NaiveDate::from_ymd_opt(2024, 1, 31)
+                    .expect("valid test value")
+                    .into()
+            ),
             19_753
         );
         assert_eq!(
-            days(NaiveDate::from_ymd_opt(1969, 12, 31).unwrap().into()),
+            days(
+                NaiveDate::from_ymd_opt(1969, 12, 31)
+                    .expect("valid test value")
+                    .into()
+            ),
             -1
         );
         assert_eq!(days(NaiveDate::MAX.into()), 95_026_236);
+        assert_eq!(
+            days(
+                NaiveDate::from_ymd_opt(1970, 1, 1)
+                    .expect("valid test value")
+                    .into()
+            ),
+            0
+        );
+        let min_days = NaiveDate::MIN
+            .signed_duration_since(NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid test value"))
+            .num_days();
+        assert_eq!(i64::from(days(NaiveDate::MIN.into())), min_days);
 
         let null = single_column(None::<NaiveDate>.into());
         assert_eq!(null.data_type(), &DataType::Date32);
@@ -1517,11 +1569,12 @@ mod tests {
                 .expect("times bind as Time64(ns)")
                 .value(0)
         };
-        let time = NaiveTime::from_hms_nano_opt(13, 30, 15, 7).unwrap();
+        let time = NaiveTime::from_hms_nano_opt(13, 30, 15, 7).expect("valid test value");
         assert_eq!(nanos(time.into()), 48_615_000_000_007);
 
-        let leap = NaiveTime::from_hms_nano_opt(23, 59, 59, 1_500_000_000).unwrap();
-        let last = NaiveTime::from_hms_nano_opt(23, 59, 59, 500_000_000).unwrap();
+        let leap =
+            NaiveTime::from_hms_nano_opt(23, 59, 59, 1_500_000_000).expect("valid test value");
+        let last = NaiveTime::from_hms_nano_opt(23, 59, 59, 500_000_000).expect("valid test value");
         assert_eq!(nanos(leap.into()), nanos(last.into()));
     }
 
@@ -1540,11 +1593,13 @@ mod tests {
                 .value(0)
         };
         assert_eq!(
-            nanos(QueryParameter::try_from(Duration::from_secs(30 * 60)).unwrap()),
+            nanos(
+                QueryParameter::try_from(Duration::from_secs(30 * 60)).expect("valid test value")
+            ),
             1_800_000_000_000
         );
         assert_eq!(
-            nanos(QueryParameter::try_from(TimeDelta::minutes(-30)).unwrap()),
+            nanos(QueryParameter::try_from(TimeDelta::minutes(-30)).expect("valid test value")),
             -1_800_000_000_000
         );
 
@@ -1556,7 +1611,10 @@ mod tests {
 
     #[test]
     fn temporal_parameters_mix_with_scalars_in_one_batch() {
-        let since = Utc.with_ymd_and_hms(2024, 1, 31, 0, 0, 0).unwrap();
+        let since = Utc
+            .with_ymd_and_hms(2024, 1, 31, 0, 0, 0)
+            .single()
+            .expect("an unambiguous test instant");
         let params = QueryParameters::new()
             .push(1_i32)
             .push(QueryParameter::try_from(since).expect("in range"))
@@ -1583,7 +1641,10 @@ mod tests {
 
     #[test]
     fn to_json_values_names_the_type_it_cannot_encode() {
-        let since = Utc.with_ymd_and_hms(2024, 1, 31, 0, 0, 0).unwrap();
+        let since = Utc
+            .with_ymd_and_hms(2024, 1, 31, 0, 0, 0)
+            .single()
+            .expect("an unambiguous test instant");
         let params = QueryParameters::from(QueryParameter::try_from(since).expect("in range"));
         let Err(QueryParameterError::UnsupportedJsonParameter { message }) =
             params.to_json_values()
