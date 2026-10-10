@@ -186,8 +186,10 @@ impl QueryParameter {
             Self::Array(array) => {
                 return Err(QueryParameterError::UnsupportedJsonParameter {
                     message: format!(
-                        "{} parameters are not supported by the async /v1/queries API, which \
-                         accepts only boolean, integer, float, string, and null bindings",
+                        "array-backed {} parameters are not supported by the async /v1/queries \
+                         API, which accepts only scalar boolean, integer, float, string, and \
+                         null bindings; bind those with the scalar `QueryParameter` variants \
+                         (such as `QueryParameter::Int64`) or use `sql_with_bindings`",
                         array.data_type()
                     ),
                 });
@@ -492,6 +494,25 @@ fn out_of_nanosecond_range(
     }
 }
 
+/// chrono represents a leap second (23:59:60.x) as a sub-second value of one
+/// second or more. Arrow's temporal types have no 61st second, so binding one
+/// would silently send a different time: it is an error instead.
+fn reject_leap_second(
+    what: &str,
+    value: impl std::fmt::Display,
+    subsec_nanos: u32,
+) -> Result<(), QueryParameterError> {
+    if subsec_nanos < 1_000_000_000 {
+        return Ok(());
+    }
+    Err(QueryParameterError::BatchCreation {
+        source: ArrowError::InvalidArgumentError(format!(
+            "{what} {value} is a leap second and cannot be bound as a query parameter: \
+             Arrow has no 61st second, so it would bind as a different time"
+        )),
+    })
+}
+
 /// Timestamps and durations bind as nanoseconds because the runtime rewrites
 /// every timestamp parameter `$N` to `CAST($N AS TIMESTAMP)`, which is
 /// `Timestamp(Nanosecond)`: a coarser unit would buy no extra range and would
@@ -512,12 +533,14 @@ fn timestamp_nanos(nanos: i64, timezone: Option<&str>) -> QueryParameter {
 /// # Errors
 ///
 /// Returns [`QueryParameterError::BatchCreation`] for an instant outside
-/// 1677-09-21 to 2262-04-11 UTC, which nanoseconds cannot represent.
+/// 1677-09-21 to 2262-04-11 UTC, which nanoseconds cannot represent, or for a
+/// leap second (23:59:60.x), which would otherwise bind as the next second.
 impl<Tz: TimeZone> TryFrom<DateTime<Tz>> for QueryParameter {
     type Error = QueryParameterError;
 
     fn try_from(value: DateTime<Tz>) -> Result<Self, Self::Error> {
         let utc = value.with_timezone(&Utc);
+        reject_leap_second("timestamp", utc.to_rfc3339(), utc.nanosecond())?;
         let nanos = utc.timestamp_nanos_opt().ok_or_else(|| {
             out_of_nanosecond_range("timestamp", utc.to_rfc3339(), TIMESTAMP_RANGE)
         })?;
@@ -531,11 +554,13 @@ impl<Tz: TimeZone> TryFrom<DateTime<Tz>> for QueryParameter {
 /// # Errors
 ///
 /// Returns [`QueryParameterError::BatchCreation`] outside 1677-09-21 to
-/// 2262-04-11, which nanoseconds cannot represent.
+/// 2262-04-11, which nanoseconds cannot represent, or for a leap second
+/// (23:59:60.x), which would otherwise bind as the next second.
 impl TryFrom<NaiveDateTime> for QueryParameter {
     type Error = QueryParameterError;
 
     fn try_from(value: NaiveDateTime) -> Result<Self, Self::Error> {
+        reject_leap_second("timestamp", value, value.nanosecond())?;
         let nanos = value
             .and_utc()
             .timestamp_nanos_opt()
@@ -596,14 +621,7 @@ impl TryFrom<NaiveTime> for QueryParameter {
 
     fn try_from(value: NaiveTime) -> Result<Self, Self::Error> {
         let subsec = value.nanosecond();
-        if subsec >= 1_000_000_000 {
-            return Err(QueryParameterError::BatchCreation {
-                source: ArrowError::InvalidArgumentError(format!(
-                    "time {value} is a leap second and cannot be bound as a query parameter: \
-                     Time64 has no 61st second"
-                )),
-            });
-        }
+        reject_leap_second("time", value, subsec)?;
         let nanos =
             i64::from(value.num_seconds_from_midnight()) * 1_000_000_000 + i64::from(subsec);
         Ok(Self::Array(Arc::new(Time64NanosecondArray::from(vec![
@@ -1535,6 +1553,33 @@ mod tests {
     }
 
     #[test]
+    fn timestamps_reject_a_leap_second_rather_than_binding_the_next_second() {
+        let leap = NaiveDate::from_ymd_opt(2016, 12, 31)
+            .expect("valid test value")
+            .and_hms_nano_opt(23, 59, 59, 1_500_000_000)
+            .expect("valid test value");
+        let next = NaiveDate::from_ymd_opt(2017, 1, 1)
+            .expect("valid test value")
+            .and_hms_nano_opt(0, 0, 0, 500_000_000)
+            .expect("valid test value");
+
+        for err in [
+            QueryParameter::try_from(leap).expect_err("naive leap second"),
+            QueryParameter::try_from(leap.and_utc()).expect_err("UTC leap second"),
+        ] {
+            let message = err.to_string();
+            assert!(message.contains("leap second"), "{message}");
+            assert!(message.contains("23:59:60.5"), "{message}");
+        }
+        assert_eq!(
+            timestamp_value(&single_column(
+                QueryParameter::try_from(next.and_utc()).expect("in range")
+            )),
+            1_483_228_800_500_000_000
+        );
+    }
+
+    #[test]
     fn naive_date_binds_as_days_since_the_epoch() {
         let days = |param: QueryParameter| {
             single_column(param)
@@ -1684,5 +1729,20 @@ mod tests {
             panic!("a timestamp has no JSON scalar encoding");
         };
         assert!(message.contains("Timestamp(ns, \"UTC\")"), "{message}");
+    }
+
+    #[test]
+    fn to_json_values_names_an_array_backed_scalar_as_array_backed() {
+        let param = QueryParameter::array(Int32Array::from(vec![1])).expect("one element");
+        let Err(QueryParameterError::UnsupportedJsonParameter { message }) =
+            QueryParameters::from(param).to_json_values()
+        else {
+            panic!("array-backed parameters have no JSON scalar encoding");
+        };
+        assert!(
+            message.starts_with("array-backed Int32 parameters"),
+            "{message}"
+        );
+        assert!(message.contains("QueryParameter::Int64"), "{message}");
     }
 }
