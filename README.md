@@ -105,7 +105,10 @@ use spiceai::{ClientBuilder, QueryParameter, QueryParameters, StreamExt};
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
   let client = ClientBuilder::new().build().await?;
 
-  let since = Utc.with_ymd_and_hms(2024, 1, 31, 0, 0, 0).unwrap();
+  let since = Utc
+    .with_ymd_and_hms(2024, 1, 31, 0, 0, 0)
+    .single()
+    .expect("2024-01-31T00:00:00Z is an unambiguous UTC instant");
   let mut stream = client
     .sql_with_bindings(
       "SELECT COUNT(*) FROM taxi_trips \
@@ -115,7 +118,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
       QueryParameters::new()
         .push(QueryParameter::try_from(since)?)
         .push(QueryParameter::try_from(Duration::from_secs(30 * 60))?)
-        .push(NaiveDate::from_ymd_opt(2024, 2, 14).unwrap()),
+        .push(NaiveDate::from_ymd_opt(2024, 2, 14).expect("2024-02-14 is a valid date")),
     )
     .await?;
 
