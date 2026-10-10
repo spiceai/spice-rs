@@ -579,16 +579,26 @@ impl TryFrom<SystemTime> for QueryParameter {
     type Error = QueryParameterError;
 
     fn try_from(value: SystemTime) -> Result<Self, Self::Error> {
-        let nanos = match value.duration_since(UNIX_EPOCH) {
-            Ok(after) => i64::try_from(after.as_nanos()).ok(),
+        // `SystemTime`'s `Debug` output is platform-specific, so an error names
+        // the value by its offset from the epoch instead.
+        let (nanos, offset, side) = match value.duration_since(UNIX_EPOCH) {
+            Ok(after) => (i64::try_from(after.as_nanos()).ok(), after, "after"),
             // Negate in i128: `i64::MIN` is a representable instant, but its
             // magnitude, 2^63, is not a positive `i64`.
-            Err(before) => i128::try_from(before.duration().as_nanos())
-                .ok()
-                .and_then(|nanos| i64::try_from(-nanos).ok()),
+            Err(before) => {
+                let before = before.duration();
+                let nanos = i128::try_from(before.as_nanos())
+                    .ok()
+                    .and_then(|nanos| i64::try_from(-nanos).ok());
+                (nanos, before, "before")
+            }
         };
         let nanos = nanos.ok_or_else(|| {
-            out_of_nanosecond_range("system time", format_args!("{value:?}"), TIMESTAMP_RANGE)
+            out_of_nanosecond_range(
+                "system time",
+                format_args!("{offset:?} {side} the Unix epoch"),
+                TIMESTAMP_RANGE,
+            )
         })?;
         Ok(timestamp_nanos(nanos, Some("UTC")))
     }
@@ -1544,7 +1554,13 @@ mod tests {
         assert_eq!(timestamp_value(&column), i64::MIN);
 
         let past_edge = edge - Duration::from_nanos(1);
-        assert!(QueryParameter::try_from(past_edge).is_err());
+        let message = QueryParameter::try_from(past_edge)
+            .expect_err("one nanosecond before i64::MIN")
+            .to_string();
+        assert!(
+            message.contains("9223372036.854775809s before the Unix epoch"),
+            "{message}"
+        );
 
         let latest = UNIX_EPOCH + Duration::from_nanos(i64::MAX.unsigned_abs());
         let column = single_column(QueryParameter::try_from(latest).expect("i64::MAX is in range"));
