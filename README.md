@@ -93,6 +93,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 ```
 
+Timestamps, dates, times, and durations bind directly too. A `chrono::DateTime` in any time zone binds as the same UTC instant (`Timestamp(ns, "UTC")`), a `NaiveDateTime` as a timestamp with no time zone, and a `std::time::Duration` or `chrono::TimeDelta` as `Duration(ns)`. Spice compares timestamps in nanoseconds, so a timestamp outside 1677-09-21 to 2262-04-11 (or a duration over about 292 years) is an error from `QueryParameter::try_from`, not a silently wrapped value. `NaiveDate` and `NaiveTime` always fit and use `push` directly. `spiceai::chrono` re-exports the `chrono` version these conversions are written against.
+
+```rust,no_run
+use std::time::Duration;
+
+use spiceai::chrono::{NaiveDate, TimeZone, Utc};
+use spiceai::{ClientBuilder, QueryParameter, QueryParameters, StreamExt};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+  let client = ClientBuilder::new().build().await?;
+
+  let since = Utc.with_ymd_and_hms(2024, 1, 31, 0, 0, 0).unwrap();
+  let mut stream = client
+    .sql_with_bindings(
+      "SELECT COUNT(*) FROM taxi_trips \
+       WHERE tpep_pickup_datetime >= $1 \
+       AND tpep_dropoff_datetime - tpep_pickup_datetime > $2 \
+       AND CAST(tpep_pickup_datetime AS DATE) <> $3;",
+      QueryParameters::new()
+        .push(QueryParameter::try_from(since)?)
+        .push(QueryParameter::try_from(Duration::from_secs(30 * 60))?)
+        .push(NaiveDate::from_ymd_opt(2024, 2, 14).unwrap()),
+    )
+    .await?;
+
+  while let Some(batch) = stream.next().await {
+    println!("rows: {}", batch?.num_rows());
+  }
+
+  Ok(())
+}
+```
+
+`query_with_bindings` sends its bindings to `/v1/queries` as JSON scalars, which have no encoding for these types, so it rejects them with an error naming the type; bind them through `sql_with_bindings`.
+
 ### Connect to Spice.ai Cloud
 
 ```rust,no_run

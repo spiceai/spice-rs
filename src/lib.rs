@@ -16,6 +16,7 @@ mod util;
 
 pub use active_query::{ActiveQuery, ActiveQueryError, ActiveQueryList, CancelActiveQueryResponse};
 pub use arrow;
+pub use chrono;
 pub use client::Error as SpiceClientError;
 pub use client::SpiceClient as Client;
 pub use client::SpiceClientBuilder as ClientBuilder;

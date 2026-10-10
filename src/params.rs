@@ -1,13 +1,16 @@
 use arrow::array::{
-    Array, ArrayRef, BinaryArray, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array,
-    Int32Array, Int64Array, LargeBinaryArray, LargeStringArray, StringArray, UInt8Array,
+    Array, ArrayRef, BinaryArray, BooleanArray, Date32Array, DurationNanosecondArray, Float32Array,
+    Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, LargeBinaryArray,
+    LargeStringArray, StringArray, Time64NanosecondArray, TimestampNanosecondArray, UInt8Array,
     UInt16Array, UInt32Array, UInt64Array, new_null_array,
 };
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::error::ArrowError;
 use arrow::record_batch::RecordBatch;
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta, TimeZone, Timelike, Utc};
 use snafu::{Snafu, ensure};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Snafu)]
 pub enum QueryParameterError {
@@ -178,11 +181,13 @@ impl QueryParameter {
                         .to_string(),
                 });
             }
-            Self::Array(_) => {
+            Self::Array(array) => {
                 return Err(QueryParameterError::UnsupportedJsonParameter {
-                    message: "array parameters are not supported by the async /v1/queries API; \
-                              use scalar bind values"
-                        .to_string(),
+                    message: format!(
+                        "{} parameters are not supported by the async /v1/queries API, which \
+                         accepts only boolean, integer, float, string, and null bindings",
+                        array.data_type()
+                    ),
                 });
             }
         };
@@ -462,6 +467,163 @@ impl<'a> From<&'a [u8]> for QueryParameter {
 impl<'a> From<Option<&'a [u8]>> for QueryParameter {
     fn from(value: Option<&'a [u8]>) -> Self {
         Self::Binary(value.map(<[u8]>::to_vec))
+    }
+}
+
+/// The Unix epoch as a date, the origin of Arrow's `Date32` day count.
+const UNIX_EPOCH_DATE: NaiveDate = NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid date");
+
+const TIMESTAMP_RANGE: &str = "1677-09-21 to 2262-04-11 UTC";
+const DURATION_RANGE: &str = "about 292 years either way";
+
+fn out_of_nanosecond_range(
+    what: &str,
+    value: impl std::fmt::Display,
+    range: &str,
+) -> QueryParameterError {
+    QueryParameterError::BatchCreation {
+        source: ArrowError::InvalidArgumentError(format!(
+            "{what} {value} cannot be bound as a query parameter: nanoseconds, the unit \
+             Spice compares it in, only span {range}"
+        )),
+    }
+}
+
+/// Timestamps and durations bind as nanoseconds because the runtime rewrites
+/// every timestamp parameter `$N` to `CAST($N AS TIMESTAMP)`, which is
+/// `Timestamp(Nanosecond)`: a coarser unit would buy no extra range and would
+/// drop sub-microsecond precision, so an exact-match filter could miss the row
+/// it names.
+fn timestamp_nanos(nanos: i64, timezone: Option<&str>) -> QueryParameter {
+    let array = TimestampNanosecondArray::from(vec![nanos]);
+    let array = match timezone {
+        Some(timezone) => array.with_timezone(timezone),
+        None => array,
+    };
+    QueryParameter::Array(Arc::new(array))
+}
+
+/// Binds an instant as `Timestamp(Nanosecond, "UTC")`, converted from its own
+/// time zone, so a filter compares the same instant whatever offset it carried.
+///
+/// # Errors
+///
+/// Returns [`QueryParameterError::BatchCreation`] for an instant outside
+/// 1677-09-21 to 2262-04-11 UTC, which nanoseconds cannot represent.
+impl<Tz: TimeZone> TryFrom<DateTime<Tz>> for QueryParameter {
+    type Error = QueryParameterError;
+
+    fn try_from(value: DateTime<Tz>) -> Result<Self, Self::Error> {
+        let utc = value.with_timezone(&Utc);
+        let nanos = utc.timestamp_nanos_opt().ok_or_else(|| {
+            out_of_nanosecond_range("timestamp", utc.to_rfc3339(), TIMESTAMP_RANGE)
+        })?;
+        Ok(timestamp_nanos(nanos, Some("UTC")))
+    }
+}
+
+/// Binds a wall-clock date and time as `Timestamp(Nanosecond)` with no time
+/// zone, for comparison against timestamp columns that have none.
+///
+/// # Errors
+///
+/// Returns [`QueryParameterError::BatchCreation`] outside 1677-09-21 to
+/// 2262-04-11, which nanoseconds cannot represent.
+impl TryFrom<NaiveDateTime> for QueryParameter {
+    type Error = QueryParameterError;
+
+    fn try_from(value: NaiveDateTime) -> Result<Self, Self::Error> {
+        let nanos = value
+            .and_utc()
+            .timestamp_nanos_opt()
+            .ok_or_else(|| out_of_nanosecond_range("timestamp", value, TIMESTAMP_RANGE))?;
+        Ok(timestamp_nanos(nanos, None))
+    }
+}
+
+/// Binds a system clock reading as `Timestamp(Nanosecond, "UTC")`.
+///
+/// # Errors
+///
+/// Returns [`QueryParameterError::BatchCreation`] for a time outside
+/// 1677-09-21 to 2262-04-11 UTC, which nanoseconds cannot represent.
+impl TryFrom<SystemTime> for QueryParameter {
+    type Error = QueryParameterError;
+
+    fn try_from(value: SystemTime) -> Result<Self, Self::Error> {
+        let nanos = match value.duration_since(UNIX_EPOCH) {
+            Ok(after) => i64::try_from(after.as_nanos()).ok(),
+            Err(before) => i64::try_from(before.duration().as_nanos())
+                .ok()
+                .map(|nanos| -nanos),
+        };
+        let nanos = nanos.ok_or_else(|| {
+            out_of_nanosecond_range("system time", format_args!("{value:?}"), TIMESTAMP_RANGE)
+        })?;
+        Ok(timestamp_nanos(nanos, Some("UTC")))
+    }
+}
+
+impl From<NaiveDate> for QueryParameter {
+    /// Binds a calendar date as `Date32`. Every `NaiveDate` fits.
+    fn from(value: NaiveDate) -> Self {
+        let days = i32::try_from(value.signed_duration_since(UNIX_EPOCH_DATE).num_days())
+            .expect("chrono's date range fits in Date32");
+        Self::Array(Arc::new(Date32Array::from(vec![days])))
+    }
+}
+
+impl From<Option<NaiveDate>> for QueryParameter {
+    fn from(value: Option<NaiveDate>) -> Self {
+        value.map_or_else(|| Self::Null(DataType::Date32), Self::from)
+    }
+}
+
+impl From<NaiveTime> for QueryParameter {
+    /// Binds a time of day as `Time64(Nanosecond)`. Arrow has no leap second,
+    /// so chrono's 23:59:60.x binds as 23:59:59.x.
+    fn from(value: NaiveTime) -> Self {
+        let nanos = i64::from(value.num_seconds_from_midnight()) * 1_000_000_000
+            + i64::from(value.nanosecond() % 1_000_000_000);
+        Self::Array(Arc::new(Time64NanosecondArray::from(vec![nanos])))
+    }
+}
+
+/// Binds a span of time as `Duration(Nanosecond)`.
+///
+/// # Errors
+///
+/// Returns [`QueryParameterError::BatchCreation`] for a duration longer than
+/// about 292 years, which nanoseconds cannot represent.
+impl TryFrom<Duration> for QueryParameter {
+    type Error = QueryParameterError;
+
+    fn try_from(value: Duration) -> Result<Self, Self::Error> {
+        let nanos = i64::try_from(value.as_nanos()).map_err(|_| {
+            out_of_nanosecond_range("duration", format_args!("{value:?}"), DURATION_RANGE)
+        })?;
+        Ok(Self::Array(Arc::new(DurationNanosecondArray::from(vec![
+            nanos,
+        ]))))
+    }
+}
+
+/// Binds a signed span of time as `Duration(Nanosecond)`.
+///
+/// # Errors
+///
+/// Returns [`QueryParameterError::BatchCreation`] for a duration longer than
+/// about 292 years either way, which nanoseconds cannot represent.
+impl TryFrom<TimeDelta> for QueryParameter {
+    type Error = QueryParameterError;
+
+    fn try_from(value: TimeDelta) -> Result<Self, Self::Error> {
+        let nanos = value
+            .num_nanoseconds()
+            .ok_or_else(|| out_of_nanosecond_range("duration", value, DURATION_RANGE))?;
+        Ok(Self::Array(Arc::new(DurationNanosecondArray::from(vec![
+            nanos,
+        ]))))
     }
 }
 
@@ -1232,5 +1394,202 @@ mod tests {
         assert!(batch.column(0).is_null(0));
         assert!(batch.column(1).is_null(0));
         assert!(batch.column(2).is_null(0));
+    }
+
+    fn single_column(param: QueryParameter) -> ArrayRef {
+        batch_from(QueryParameters::from(param)).column(0).clone()
+    }
+
+    fn timestamp_value(column: &ArrayRef) -> i64 {
+        column
+            .as_any()
+            .downcast_ref::<TimestampNanosecondArray>()
+            .expect("timestamp parameters bind as nanoseconds")
+            .value(0)
+    }
+
+    #[test]
+    fn date_time_binds_as_the_same_utc_instant_whatever_its_offset() {
+        let utc = Utc.with_ymd_and_hms(2024, 1, 31, 5, 0, 0).unwrap();
+        let eastern = chrono::FixedOffset::west_opt(5 * 3600)
+            .unwrap()
+            .with_ymd_and_hms(2024, 1, 31, 0, 0, 0)
+            .unwrap();
+
+        let from_utc = single_column(QueryParameter::try_from(utc).expect("in range"));
+        let from_eastern = single_column(QueryParameter::try_from(eastern).expect("in range"));
+
+        let utc_tz = DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()));
+        assert_eq!(from_utc.data_type(), &utc_tz);
+        assert_eq!(from_eastern.data_type(), &utc_tz);
+        assert_eq!(timestamp_value(&from_utc), 1_706_677_200_000_000_000);
+        assert_eq!(timestamp_value(&from_eastern), 1_706_677_200_000_000_000);
+    }
+
+    #[test]
+    fn date_time_keeps_sub_microsecond_precision() {
+        let precise = Utc
+            .with_ymd_and_hms(2024, 1, 31, 0, 0, 0)
+            .unwrap()
+            .with_nanosecond(123_456_789)
+            .unwrap();
+        let column = single_column(QueryParameter::try_from(precise).expect("in range"));
+        assert_eq!(timestamp_value(&column) % 1_000_000_000, 123_456_789);
+    }
+
+    #[test]
+    fn date_time_outside_nanosecond_range_is_an_error_not_a_wrapped_value() {
+        for year in [1600, 2300] {
+            let instant = Utc.with_ymd_and_hms(year, 1, 1, 0, 0, 0).unwrap();
+            let err = QueryParameter::try_from(instant).expect_err("out of range");
+            let message = err.to_string();
+            assert!(message.contains(&format!("{year}-01-01")), "{message}");
+            assert!(message.contains(TIMESTAMP_RANGE), "{message}");
+        }
+    }
+
+    #[test]
+    fn naive_date_time_binds_without_a_time_zone() {
+        let wall = NaiveDate::from_ymd_opt(2024, 1, 31)
+            .unwrap()
+            .and_hms_opt(5, 0, 0)
+            .unwrap();
+        let column = single_column(QueryParameter::try_from(wall).expect("in range"));
+        assert_eq!(
+            column.data_type(),
+            &DataType::Timestamp(TimeUnit::Nanosecond, None)
+        );
+        assert_eq!(timestamp_value(&column), 1_706_677_200_000_000_000);
+
+        let far = NaiveDate::from_ymd_opt(2300, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        assert!(QueryParameter::try_from(far).is_err());
+    }
+
+    #[test]
+    fn system_time_binds_on_either_side_of_the_epoch() {
+        let after = UNIX_EPOCH + Duration::from_nanos(1_706_677_200_000_000_001);
+        let before = UNIX_EPOCH - Duration::from_secs(86_400);
+
+        let after = single_column(QueryParameter::try_from(after).expect("in range"));
+        let before = single_column(QueryParameter::try_from(before).expect("in range"));
+
+        assert_eq!(
+            after.data_type(),
+            &DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()))
+        );
+        assert_eq!(timestamp_value(&after), 1_706_677_200_000_000_001);
+        assert_eq!(timestamp_value(&before), -86_400_000_000_000);
+    }
+
+    #[test]
+    fn naive_date_binds_as_days_since_the_epoch() {
+        let days = |param: QueryParameter| {
+            single_column(param)
+                .as_any()
+                .downcast_ref::<Date32Array>()
+                .expect("dates bind as Date32")
+                .value(0)
+        };
+        assert_eq!(
+            days(NaiveDate::from_ymd_opt(2024, 1, 31).unwrap().into()),
+            19_753
+        );
+        assert_eq!(
+            days(NaiveDate::from_ymd_opt(1969, 12, 31).unwrap().into()),
+            -1
+        );
+        assert_eq!(days(NaiveDate::MAX.into()), 95_026_236);
+
+        let null = single_column(None::<NaiveDate>.into());
+        assert_eq!(null.data_type(), &DataType::Date32);
+        assert!(null.is_null(0));
+    }
+
+    #[test]
+    fn naive_time_binds_as_nanoseconds_since_midnight() {
+        let nanos = |param: QueryParameter| {
+            single_column(param)
+                .as_any()
+                .downcast_ref::<Time64NanosecondArray>()
+                .expect("times bind as Time64(ns)")
+                .value(0)
+        };
+        let time = NaiveTime::from_hms_nano_opt(13, 30, 15, 7).unwrap();
+        assert_eq!(nanos(time.into()), 48_615_000_000_007);
+
+        let leap = NaiveTime::from_hms_nano_opt(23, 59, 59, 1_500_000_000).unwrap();
+        let last = NaiveTime::from_hms_nano_opt(23, 59, 59, 500_000_000).unwrap();
+        assert_eq!(nanos(leap.into()), nanos(last.into()));
+    }
+
+    #[test]
+    fn durations_bind_as_nanoseconds_and_reject_overflow() {
+        let nanos = |param: QueryParameter| {
+            let column = single_column(param);
+            assert_eq!(
+                column.data_type(),
+                &DataType::Duration(TimeUnit::Nanosecond)
+            );
+            column
+                .as_any()
+                .downcast_ref::<DurationNanosecondArray>()
+                .expect("durations bind as Duration(ns)")
+                .value(0)
+        };
+        assert_eq!(
+            nanos(QueryParameter::try_from(Duration::from_secs(30 * 60)).unwrap()),
+            1_800_000_000_000
+        );
+        assert_eq!(
+            nanos(QueryParameter::try_from(TimeDelta::minutes(-30)).unwrap()),
+            -1_800_000_000_000
+        );
+
+        let err = QueryParameter::try_from(Duration::from_secs(300 * 365 * 86_400))
+            .expect_err("300 years overflows nanoseconds");
+        assert!(err.to_string().contains("duration"), "{err}");
+        assert!(QueryParameter::try_from(TimeDelta::days(300 * 365)).is_err());
+    }
+
+    #[test]
+    fn temporal_parameters_mix_with_scalars_in_one_batch() {
+        let since = Utc.with_ymd_and_hms(2024, 1, 31, 0, 0, 0).unwrap();
+        let params = QueryParameters::new()
+            .push(1_i32)
+            .push(QueryParameter::try_from(since).expect("in range"))
+            .push(QueryParameter::try_from(Duration::from_secs(1800)).expect("in range"));
+        let batch = batch_from(params);
+        let schema = batch.schema();
+        let fields: Vec<_> = schema
+            .fields()
+            .iter()
+            .map(|f| (f.name().as_str(), f.data_type().clone()))
+            .collect();
+        assert_eq!(
+            fields,
+            vec![
+                ("$1", DataType::Int32),
+                (
+                    "$2",
+                    DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()))
+                ),
+                ("$3", DataType::Duration(TimeUnit::Nanosecond)),
+            ]
+        );
+    }
+
+    #[test]
+    fn to_json_values_names_the_type_it_cannot_encode() {
+        let since = Utc.with_ymd_and_hms(2024, 1, 31, 0, 0, 0).unwrap();
+        let params = QueryParameters::from(QueryParameter::try_from(since).expect("in range"));
+        let Err(QueryParameterError::UnsupportedJsonParameter { message }) =
+            params.to_json_values()
+        else {
+            panic!("a timestamp has no JSON scalar encoding");
+        };
+        assert!(message.contains("Timestamp(ns, \"UTC\")"), "{message}");
     }
 }
