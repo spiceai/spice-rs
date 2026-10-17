@@ -278,7 +278,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 ```
 
-`with_keywords([...])` keeps only rows whose searched column contains every keyword (a case-insensitive substring match). It filters candidates before ranking and adds no scoring signal of its own, so a row missing a keyword is dropped however similar it is. `with_where("user_id = 42")` filters candidate rows with a SQL predicate.
+`with_keywords([...])` keeps only rows whose searched column contains every keyword (a case-insensitive `ILIKE '%keyword%'` match, so `%` and `_` in a keyword act as SQL wildcards). It filters candidates before ranking and adds no scoring signal of its own, so a row missing a keyword is dropped however similar it is. `with_where("user_id = 42")` filters candidate rows with a SQL predicate.
 
 Each `SearchMatch` carries `dataset`, `score` (higher is more similar), `matches` (matched values keyed by source column — a list per column, since one column can contribute several chunks to a match), `primary_key`, `data`, and `metadata`.
 
