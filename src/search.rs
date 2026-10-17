@@ -124,7 +124,7 @@ impl SearchRequest {
     /// The runtime turns each keyword into a case-insensitive substring match
     /// (`ILIKE '%keyword%'`) on the column being searched, and ANDs the matches
     /// together and with [`with_where`](Self::with_where) before ranking. A
-    /// keyword does not boost matching rows or change their scores: a row
+    /// keyword adds no scoring signal and does not boost matching rows: a row
     /// missing any keyword is dropped, however similar it is. Ranking that
     /// blends full-text and vector scores comes from configuring full-text
     /// search on the dataset, not from this option.
