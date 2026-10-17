@@ -697,8 +697,8 @@ impl SpiceClient {
     ///
     /// Runs against datasets that have an embedding column and a loaded
     /// embedding model — see [Search & Retrieval](https://docs.spice.ai/features/search-and-retrieval)
-    /// for how to configure them. Adding keywords to the request turns this
-    /// into a hybrid search, combining a lexical pass with the vector scores.
+    /// for how to configure them. Keywords on the request filter candidates
+    /// before ranking; see [`SearchRequest::with_keywords`].
     ///
     /// Addresses the client's HTTP endpoint, which defaults to the runtime that serves
     /// the configured Flight endpoint. [`http_url()`](SpiceClientBuilder::http_url)

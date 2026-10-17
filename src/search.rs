@@ -30,9 +30,9 @@ pub enum SearchError {
 
 /// A search against the runtime's `/v1/search` endpoint.
 ///
-/// Only the search text is required. Adding keywords turns the search into a
-/// hybrid one: the runtime runs a lexical pass alongside the vector pass and
-/// combines the scores into a single ranking.
+/// Only the search text is required. Keywords narrow the candidates rather
+/// than adding to the ranking: a row is ranked only if the searched column
+/// contains every keyword (see [`with_keywords`](Self::with_keywords)).
 ///
 /// ```
 /// use spiceai::SearchRequest;
@@ -67,7 +67,8 @@ pub struct SearchRequest {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub additional_columns: Vec<String>,
 
-    /// Keywords driving the lexical pass of a hybrid search.
+    /// Keywords every candidate must contain. See
+    /// [`with_keywords`](Self::with_keywords).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub keywords: Vec<String>,
 }
@@ -118,7 +119,15 @@ impl SearchRequest {
         self
     }
 
-    /// Adds a lexical pass to the search, producing a hybrid ranking.
+    /// Keeps only candidates whose searched column contains every keyword.
+    ///
+    /// The runtime turns each keyword into a case-insensitive substring match
+    /// (`ILIKE '%keyword%'`) on the column being searched, and ANDs the matches
+    /// together and with [`with_where`](Self::with_where) before ranking. A
+    /// keyword does not boost matching rows or change their scores: a row
+    /// missing any keyword is dropped, however similar it is. Ranking that
+    /// blends full-text and vector scores comes from configuring full-text
+    /// search on the dataset, not from this option.
     #[must_use]
     pub fn with_keywords<I, S>(mut self, keywords: I) -> Self
     where
