@@ -3,12 +3,17 @@ use crate::config::GenericError;
 use crate::config::get_user_agent;
 use arrow::error::ArrowError;
 use arrow::record_batch::RecordBatch;
+use arrow_flight::Action;
 use arrow_flight::FlightDescriptor;
 use arrow_flight::HandshakeRequest;
 use arrow_flight::decode::FlightRecordBatchStream;
+use arrow_flight::encode::FlightDataEncoderBuilder;
 use arrow_flight::error::FlightError;
 use arrow_flight::flight_service_client::FlightServiceClient;
-use arrow_flight::sql::client::FlightSqlServiceClient;
+use arrow_flight::sql::{
+    ActionCreatePreparedStatementRequest, ActionCreatePreparedStatementResult, Any,
+    CommandPreparedStatementQuery, DoPutPreparedStatementResult, ProstMessageExt,
+};
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
 use bytes::Bytes;
@@ -18,14 +23,17 @@ use futures::TryStreamExt;
 use futures::stream;
 use futures::task::Context;
 use futures::task::Poll;
+use prost::Message;
 use snafu::Snafu;
 use std::collections::HashMap;
+use std::error::Error as StdError;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::PoisonError;
 use tonic::IntoRequest;
+use tonic::IntoStreamingRequest;
 use tonic::metadata::AsciiMetadataKey;
 use tonic::transport::Channel;
 
@@ -121,8 +129,9 @@ impl SqlFlightClient {
             .await
             .map_err(|source| HandshakeError { source })?;
 
+        let (metadata, stream, _ext) = resp.into_parts();
         let mut token: Option<String> = None;
-        if let Some(auth) = resp.metadata().get("authorization") {
+        if let Some(auth) = metadata.get("authorization") {
             let auth = auth
                 .to_str()
                 .map_err(|_| ArrowError::ParseError("Can't read auth header".to_string()))?;
@@ -133,6 +142,12 @@ impl SqlFlightClient {
             let auth = auth[bearer.len()..].to_string();
             token = Some(auth);
         }
+        // The token lives on the response headers; the body still has to be
+        // read to its end. Dropping it here is the same early-RST that
+        // `sql_with_bindings` used to hit on every prepare.
+        drain_grpc_stream(stream)
+            .await
+            .map_err(|source| HandshakeError { source })?;
         Ok(token)
     }
 
@@ -317,36 +332,126 @@ impl SqlFlightClient {
         parameters: RecordBatch,
         token: Option<Arc<str>>,
     ) -> std::result::Result<FlightRecordBatchStream, GenericError> {
-        let mut client = FlightSqlServiceClient::new_from_inner(self.client.clone());
-        // The Flight SQL client sends only the headers it is given, so the session and
-        // the user agent have to reach it the same way they reach a plain query.
-        for (key, value) in self.headers.iter() {
-            client.set_header(key, value);
-        }
-        if let Some(token) = token {
-            client.set_token(token.to_string());
-        }
-        let mut prepared_stmt = client.prepare(query.to_string(), None).await?;
-
-        prepared_stmt.set_parameters(parameters)?;
-
-        let flight_info = prepared_stmt.execute().await?;
-
-        let endpoint = flight_info
-            .endpoint
-            .first()
-            .ok_or("No endpoint in flight info")?;
-
-        let stream = client
-            .do_get(
-                endpoint
-                    .ticket
-                    .clone()
-                    .ok_or("No flight ticket in response")?,
-            )
+        // Arrow Flight SQL's `prepare()` / `PreparedStatement::execute()` read
+        // only the first message of the DoAction and DoPut streams and drop the
+        // rest. Dropping before gRPC trailers makes h2 send RST_STREAM CANCEL;
+        // late trailers then count as a local reset. After 1024 of those on one
+        // connection, h2 sends GOAWAY ENHANCE_YOUR_CALM (`too_many_internal_resets`)
+        // and every in-flight call on the connection fails. Concurrent
+        // `sql_with_bindings` hits that limit in seconds; a single worker and
+        // plain `sql()` do not.
+        //
+        // Issue the four Flight SQL RPCs here and drain every response stream
+        // so trailers arrive on an open stream. `execute_update`,
+        // `begin_transaction`, and `close` are not used by this SDK; the
+        // runtime's ClosePreparedStatement is a no-op, so this path does not
+        // add that round trip.
+        let token = token.as_deref();
+        let handle = self.create_prepared_statement(query, token).await?;
+        let handle = self
+            .bind_prepared_statement(handle, parameters, token)
             .await?;
-        Ok(stream)
+        let info = self.prepared_statement_flight_info(handle, token).await?;
+
+        for ep in info.endpoint {
+            if let Some(tkt) = ep.ticket {
+                let req = self.set_request_headers(tkt.into_request(), token)?;
+                let (md, response_stream, _ext) =
+                    self.client.clone().do_get(req).await?.into_parts();
+
+                return Ok(FlightRecordBatchStream::new_from_flight_data(
+                    response_stream.map_err(|e| FlightError::Tonic(Box::new(e))),
+                )
+                .with_headers(md));
+            }
+        }
+        Err("No endpoints found".into())
     }
+
+    async fn create_prepared_statement(
+        &self,
+        query: &str,
+        token: Option<&str>,
+    ) -> std::result::Result<Bytes, GenericError> {
+        let cmd = ActionCreatePreparedStatementRequest {
+            query: query.to_string(),
+            transaction_id: None,
+        };
+        let action = Action {
+            r#type: "CreatePreparedStatement".to_string(),
+            body: cmd.as_any().encode_to_vec().into(),
+        };
+        let req = self.set_request_headers(action.into_request(), token)?;
+        let messages =
+            drain_grpc_stream(self.client.clone().do_action(req).await?.into_inner()).await?;
+        let Some(first) = messages.into_iter().next() else {
+            return Err("CreatePreparedStatement returned no result".into());
+        };
+        let any = Any::decode(&*first.body)?;
+        let Some(prepared) = any.unpack()? else {
+            return Err(
+                "CreatePreparedStatement result was not ActionCreatePreparedStatementResult".into(),
+            );
+        };
+        let ActionCreatePreparedStatementResult {
+            prepared_statement_handle,
+            ..
+        } = prepared;
+        Ok(prepared_statement_handle)
+    }
+
+    async fn bind_prepared_statement(
+        &self,
+        mut handle: Bytes,
+        parameters: RecordBatch,
+        token: Option<&str>,
+    ) -> std::result::Result<Bytes, GenericError> {
+        let cmd = CommandPreparedStatementQuery {
+            prepared_statement_handle: handle.clone(),
+        };
+        let descriptor = FlightDescriptor::new_cmd(cmd.as_any().encode_to_vec());
+        let flight_data = FlightDataEncoderBuilder::new()
+            .with_flight_descriptor(Some(descriptor))
+            .with_schema(parameters.schema())
+            .build(stream::iter([Ok(parameters)]))
+            .try_collect::<Vec<_>>()
+            .await?;
+        let req =
+            self.set_request_headers(stream::iter(flight_data).into_streaming_request(), token)?;
+        let results =
+            drain_grpc_stream(self.client.clone().do_put(req).await?.into_inner()).await?;
+        for result in results {
+            if result.app_metadata.is_empty() {
+                continue;
+            }
+            let decoded = DoPutPreparedStatementResult::decode(&*result.app_metadata)?;
+            if let Some(updated) = decoded.prepared_statement_handle {
+                handle = updated;
+            }
+        }
+        Ok(handle)
+    }
+
+    async fn prepared_statement_flight_info(
+        &self,
+        handle: Bytes,
+        token: Option<&str>,
+    ) -> std::result::Result<arrow_flight::FlightInfo, GenericError> {
+        let cmd = CommandPreparedStatementQuery {
+            prepared_statement_handle: handle,
+        };
+        let descriptor = FlightDescriptor::new_cmd(cmd.as_any().encode_to_vec());
+        let req = self.set_request_headers(descriptor.into_request(), token)?;
+        Ok(self.client.clone().get_flight_info(req).await?.into_inner())
+    }
+}
+
+/// Reads a gRPC response stream to its end, including trailers.
+///
+/// Returning after the first message drops the stream and makes h2 RST it;
+/// that reset is what accumulates into GOAWAY `too_many_internal_resets`.
+async fn drain_grpc_stream<T>(stream: tonic::Streaming<T>) -> Result<Vec<T>, tonic::Status> {
+    stream.try_collect().await
 }
 
 /// Whether the runtime refused the credential a request was sent under.
@@ -544,12 +649,43 @@ fn has_reset_marker(message: &str) -> bool {
         || message.contains("transport error")
 }
 
+/// h2 GOAWAY `too_many_internal_resets` is reported as `ResourceExhausted`.
+/// A genuine quota error uses the same code, so only these fragments are
+/// treated as a dead connection. The 1024 local-reset counter never decays,
+/// so a long-lived client can still see this after the drain fix.
+fn has_goaway_marker(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    text.contains("too_many_internal_resets")
+        || text.contains("goaway")
+        || text.contains("h2 protocol error")
+}
+
+fn status_chain_has_goaway_marker(status: &tonic::Status) -> bool {
+    if has_goaway_marker(status.message()) {
+        return true;
+    }
+    let mut current = StdError::source(status);
+    while let Some(error) = current {
+        if has_goaway_marker(&error.to_string()) {
+            return true;
+        }
+        current = error.source();
+    }
+    false
+}
+
+fn is_goaway_resource_exhausted(status: &tonic::Status) -> bool {
+    status.code() == tonic::Code::ResourceExhausted && status_chain_has_goaway_marker(status)
+}
+
 pub fn is_tonic_reset_error(error: &tonic::Status) -> bool {
     is_reset_code(error.code()) && has_reset_marker(error.message())
 }
 
 fn is_retryable_status(status: &tonic::Status) -> bool {
-    is_tonic_reset_error(status) || status.metadata().contains_key(RETRYABLE_METADATA_KEY)
+    is_tonic_reset_error(status)
+        || is_goaway_resource_exhausted(status)
+        || status.metadata().contains_key(RETRYABLE_METADATA_KEY)
 }
 
 fn is_connection_reset_flight_error(error: &FlightError) -> bool {
@@ -678,6 +814,83 @@ mod tests {
     fn test_is_tonic_reset_error_case_insensitive() {
         let status = tonic::Status::internal("HTTP2 ERROR OCCURRED");
         assert!(is_tonic_reset_error(&status));
+    }
+
+    /// GOAWAY `too_many_internal_resets` is ResourceExhausted, not a reset
+    /// code. The message or the source chain has to name it; a quota error
+    /// uses the same code and must stay permanent.
+    #[test]
+    fn test_resource_exhausted_goaway_is_retryable() {
+        for message in [
+            r#"http2 error: connection error detected: GOAWAY received: GoAway(b"too_many_internal_resets", ENHANCE_YOUR_CALM, Library)"#,
+            "h2 protocol error: http2 error",
+            "h2 protocol error: error reading a body from connection",
+            "too_many_internal_resets",
+        ] {
+            let status = tonic::Status::resource_exhausted(message);
+            assert!(is_retryable_status(&status), "{message} must be retryable");
+            let error: GenericError = Box::new(status);
+            assert!(
+                is_connection_reset_generic_error(&error),
+                "{message} must reach the reset-retry path"
+            );
+        }
+    }
+
+    #[test]
+    fn test_resource_exhausted_goaway_in_source_chain_is_retryable() {
+        #[derive(Debug)]
+        struct GoAwaySource;
+
+        impl std::fmt::Display for GoAwaySource {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(
+                    f,
+                    r#"GoAway(b"too_many_internal_resets", ENHANCE_YOUR_CALM, Library)"#
+                )
+            }
+        }
+
+        impl StdError for GoAwaySource {}
+
+        let mut status = tonic::Status::resource_exhausted("connection closed");
+        status.set_source(Arc::new(GoAwaySource));
+        assert!(
+            is_retryable_status(&status),
+            "a GOAWAY that lives only on the source chain must still retry"
+        );
+        assert!(!is_tonic_reset_error(&status));
+    }
+
+    #[test]
+    fn test_plain_resource_exhausted_is_not_retryable() {
+        for message in [
+            "quota exceeded",
+            "rate limited",
+            "resource exhausted",
+            "http2 error",
+        ] {
+            let status = tonic::Status::resource_exhausted(message);
+            assert!(
+                !is_retryable_status(&status),
+                "{message} must stay a hard ResourceExhausted"
+            );
+            let error: GenericError = Box::new(status);
+            assert!(
+                !is_connection_reset_generic_error(&error),
+                "{message} must not use the reset-retry path"
+            );
+        }
+    }
+
+    #[test]
+    fn test_boxed_flight_goaway_retries() {
+        let error: GenericError = Box::new(FlightError::Tonic(Box::new(
+            tonic::Status::resource_exhausted(
+                "h2 protocol error: error reading a body from connection",
+            ),
+        )));
+        assert!(is_connection_reset_generic_error(&error));
     }
 
     #[test]
