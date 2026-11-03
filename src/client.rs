@@ -990,6 +990,7 @@ pub struct SpiceClientBuilder {
     tls_client_certificate_file: Option<String>,
     tls_client_key_file: Option<String>,
     tls_ca_certificate_file: Option<String>,
+    max_decoding_message_size: usize,
 }
 
 impl Default for SpiceClientBuilder {
@@ -1011,6 +1012,7 @@ impl SpiceClientBuilder {
             tls_client_certificate_file: None,
             tls_client_key_file: None,
             tls_ca_certificate_file: None,
+            max_decoding_message_size: crate::DEFAULT_MAX_DECODING_MESSAGE_SIZE,
         }
     }
 
@@ -1096,6 +1098,19 @@ impl SpiceClientBuilder {
         self
     }
 
+    /// Sets the largest single Flight message, in bytes, the client accepts from the
+    /// runtime. Defaults to [`DEFAULT_MAX_DECODING_MESSAGE_SIZE`](crate::DEFAULT_MAX_DECODING_MESSAGE_SIZE)
+    /// (100 MiB), the limit the runtime itself applies to Flight messages it receives.
+    ///
+    /// A query whose result arrives in a larger message fails with
+    /// `decoded message length too large`. Raise this for results with very wide rows, or
+    /// lower it to cap how much memory one message can take.
+    #[must_use]
+    pub fn max_decoding_message_size(mut self, bytes: usize) -> Self {
+        self.max_decoding_message_size = bytes;
+        self
+    }
+
     /// Builds the `SpiceClient` with the specified configuration.
     ///
     /// ## Errors
@@ -1168,13 +1183,16 @@ impl SpiceClientBuilder {
         };
 
         Ok(SpiceClient {
-            flight: Arc::new(SqlFlightClient::new(
-                flight_channel,
-                self.api_key.clone(),
-                self.user_agent.clone(),
-                self.cache_control.clone(),
-                self.max_retries,
-            )),
+            flight: Arc::new(
+                SqlFlightClient::new(
+                    flight_channel,
+                    self.api_key.clone(),
+                    self.user_agent.clone(),
+                    self.cache_control.clone(),
+                    self.max_retries,
+                )
+                .with_max_decoding_message_size(self.max_decoding_message_size),
+            ),
             http_client,
         })
     }

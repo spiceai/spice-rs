@@ -99,11 +99,19 @@ impl SqlFlightClient {
         SqlFlightClient {
             api_key: api_key.map(|s| Arc::from(s.into_boxed_str())),
             headers: Arc::new(headers),
-            client: FlightServiceClient::new(chan),
+            client: FlightServiceClient::new(chan)
+                .max_decoding_message_size(crate::DEFAULT_MAX_DECODING_MESSAGE_SIZE),
             max_retries,
             session: Arc::new(Mutex::new(Session::Pending)),
             handshake_gate: Arc::new(tokio::sync::Mutex::new(())),
         }
+    }
+
+    /// Sets the largest gRPC message, in bytes, this client accepts from the runtime.
+    #[must_use]
+    pub fn with_max_decoding_message_size(mut self, limit: usize) -> Self {
+        self.client = self.client.max_decoding_message_size(limit);
+        self
     }
 
     async fn handshake(
