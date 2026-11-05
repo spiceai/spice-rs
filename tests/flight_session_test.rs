@@ -352,12 +352,16 @@ async fn sql_handshakes_once_and_reuses_the_session() {
     }
 }
 
+fn credential_path(test: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("spiceai-credential-{test}-{}", std::process::id()))
+}
+
 /// A token rotated on disk must reach the runtime when the session renews: a client
 /// that kept the first token would be refused for good once that token expired.
 #[tokio::test]
 async fn credential_file_is_read_again_when_the_session_renews() {
     let (url, ledger) = start_server().await;
-    let path = std::env::temp_dir().join(format!("spiceai-credential-{}", std::process::id()));
+    let path = credential_path("rotation");
     std::fs::write(&path, "first-token\n").expect("write token");
     ledger.accept_credential("first-token");
     let client = ClientBuilder::new()
@@ -379,6 +383,57 @@ async fn credential_file_is_read_again_when_the_session_renews() {
     assert_eq!(ledger.handshakes(), 2);
 
     std::fs::remove_file(&path).expect("remove token");
+}
+
+/// The file wins over an api key at the first handshake and at every renewal.
+#[tokio::test]
+async fn credential_file_takes_precedence_over_the_api_key() {
+    let (url, ledger) = start_server().await;
+    let path = credential_path("precedence");
+    std::fs::write(&path, "file-token").expect("write token");
+    ledger.accept_credential("file-token");
+    let client = ClientBuilder::new()
+        .flight_url(&url)
+        .api_key("not-the-accepted-key")
+        .credential_file(&path)
+        .build()
+        .await
+        .expect("client");
+
+    let stream = client.sql("SELECT 1").await.expect("first query");
+    assert_eq!(count_rows(stream).await, 1);
+
+    ledger.expire_sessions();
+    let stream = client.sql("SELECT 1").await.expect("query after renewal");
+    assert_eq!(count_rows(stream).await, 1);
+    assert_eq!(ledger.handshakes(), 2);
+
+    std::fs::remove_file(&path).expect("remove token");
+}
+
+/// A file that cannot be read fails the query and names the file. Falling back to the
+/// api key would quietly run the client under a different identity.
+#[tokio::test]
+async fn unreadable_credential_file_does_not_fall_back_to_the_api_key() {
+    let (url, ledger) = start_server().await;
+    let path = credential_path("missing");
+    let client = ClientBuilder::new()
+        .flight_url(&url)
+        .api_key(API_KEY)
+        .credential_file(&path)
+        .build()
+        .await
+        .expect("client");
+
+    let Err(error) = client.sql("SELECT 1").await else {
+        panic!("a query must fail when the credential file cannot be read");
+    };
+
+    assert!(
+        error.to_string().contains(&path.display().to_string()),
+        "{error}"
+    );
+    assert_eq!(ledger.handshake_attempts(), 0);
 }
 
 /// A parameterized query has to reach the runtime under the same session and user

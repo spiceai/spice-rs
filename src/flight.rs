@@ -167,7 +167,12 @@ impl SqlFlightClient {
     async fn credential(&self) -> std::result::Result<Option<Arc<str>>, GenericError> {
         match &self.credential_file {
             Some(path) => {
-                let contents = tokio::fs::read_to_string(path).await?;
+                let contents = tokio::fs::read_to_string(path).await.map_err(|source| {
+                    CredentialFileError {
+                        path: path.to_path_buf(),
+                        source,
+                    }
+                })?;
                 Ok(Some(Arc::from(contents.trim())))
             }
             None => Ok(self.api_key.clone()),
@@ -644,6 +649,13 @@ impl Stream for RetryableQueryStream {
 /// The status is the only thing that says whether the failure is worth retrying, and a
 /// rendered one is indistinguishable from a permanent failure. `mod flight` is private,
 /// so this is not part of the crate's public API.
+#[derive(Debug, Snafu)]
+#[snafu(display("Can't read the credential file {}: {source}", path.display()))]
+pub struct CredentialFileError {
+    path: std::path::PathBuf,
+    source: std::io::Error,
+}
+
 #[derive(Debug, Snafu)]
 #[snafu(display("Can't handshake: {source}"))]
 pub struct HandshakeError {
