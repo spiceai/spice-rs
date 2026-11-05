@@ -64,6 +64,9 @@ pub struct SqlFlightClient {
     headers: Arc<HashMap<String, String>>,
     client: FlightServiceClient<Channel>,
     api_key: Option<Arc<str>>,
+    /// A file holding the credential, read at every handshake so a token rotated on
+    /// disk is used when the session renews. Takes precedence over `api_key`.
+    credential_file: Option<Arc<std::path::Path>>,
     max_retries: u32,
     /// The session the runtime issued for `api_key`, shared by every clone of this
     /// client so a retry or a concurrent query reuses it rather than handshaking again.
@@ -98,12 +101,20 @@ impl SqlFlightClient {
 
         SqlFlightClient {
             api_key: api_key.map(|s| Arc::from(s.into_boxed_str())),
+            credential_file: None,
             headers: Arc::new(headers),
             client: FlightServiceClient::new(chan),
             max_retries,
             session: Arc::new(Mutex::new(Session::Pending)),
             handshake_gate: Arc::new(tokio::sync::Mutex::new(())),
         }
+    }
+
+    /// Reads the credential from `path` at every handshake instead of using `api_key`.
+    #[must_use]
+    pub fn with_credential_file(mut self, path: Option<std::path::PathBuf>) -> Self {
+        self.credential_file = path.map(Arc::from);
+        self
     }
 
     async fn handshake(
@@ -151,6 +162,18 @@ impl SqlFlightClient {
         Ok(token)
     }
 
+    /// The credential for a handshake: the file's current contents when a file is
+    /// configured, otherwise the api key.
+    async fn credential(&self) -> std::result::Result<Option<Arc<str>>, GenericError> {
+        match &self.credential_file {
+            Some(path) => {
+                let contents = tokio::fs::read_to_string(path).await?;
+                Ok(Some(Arc::from(contents.trim())))
+            }
+            None => Ok(self.api_key.clone()),
+        }
+    }
+
     fn cached_session(&self) -> Session {
         self.session
             .lock()
@@ -188,15 +211,12 @@ impl SqlFlightClient {
     /// handshake that *fails* is serialized by the same gate rather than retried in
     /// parallel, which is the cost of the guarantee.
     async fn authenticate(&self) -> std::result::Result<Credential, GenericError> {
-        let (username, password) = match &self.api_key {
-            Some(api_key) => ("", api_key.as_ref()),
-            None => {
-                return Ok(Credential {
-                    token: None,
-                    reused: false,
-                });
-            }
-        };
+        if self.api_key.is_none() && self.credential_file.is_none() {
+            return Ok(Credential {
+                token: None,
+                reused: false,
+            });
+        }
 
         if let Session::Established(token) = self.cached_session() {
             return Ok(Credential {
@@ -217,7 +237,13 @@ impl SqlFlightClient {
             });
         }
 
-        let token: Option<Arc<str>> = self.handshake(username, password).await?.map(Arc::from);
+        let Some(password) = self.credential().await? else {
+            return Ok(Credential {
+                token: None,
+                reused: false,
+            });
+        };
+        let token: Option<Arc<str>> = self.handshake("", &password).await?.map(Arc::from);
         self.store_session(token.clone());
 
         Ok(Credential {

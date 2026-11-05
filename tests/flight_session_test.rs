@@ -44,6 +44,8 @@ struct Seen {
 struct Ledger {
     handshake_attempts: AtomicUsize,
     handshakes: AtomicUsize,
+    /// The credential the handshake accepts in place of `API_KEY`.
+    credential: Mutex<Option<String>>,
     /// Tokens the server still honours.
     sessions: Mutex<HashSet<String>>,
     /// Refuse every bearer token, as a runtime whose session store forgot them would.
@@ -64,6 +66,10 @@ impl Ledger {
     /// restart would.
     fn expire_sessions(&self) {
         self.sessions.lock().expect("sessions").clear();
+    }
+
+    fn accept_credential(&self, credential: &str) {
+        *self.credential.lock().expect("credential") = Some(credential.to_string());
     }
 
     fn requests(&self) -> Vec<Seen> {
@@ -142,7 +148,14 @@ impl FlightService for SessionServer {
         self.ledger
             .handshake_attempts
             .fetch_add(1, Ordering::SeqCst);
-        let expected = format!("Basic {}", BASE64_STANDARD.encode(format!(":{API_KEY}")));
+        let credential = self
+            .ledger
+            .credential
+            .lock()
+            .expect("credential")
+            .clone()
+            .unwrap_or_else(|| API_KEY.to_string());
+        let expected = format!("Basic {}", BASE64_STANDARD.encode(format!(":{credential}")));
         let presented = request
             .metadata()
             .get("authorization")
@@ -337,6 +350,35 @@ async fn sql_handshakes_once_and_reuses_the_session() {
     for get in gets {
         assert_eq!(get.authorization.as_deref(), Some("Bearer session-1"));
     }
+}
+
+/// A token rotated on disk must reach the runtime when the session renews: a client
+/// that kept the first token would be refused for good once that token expired.
+#[tokio::test]
+async fn credential_file_is_read_again_when_the_session_renews() {
+    let (url, ledger) = start_server().await;
+    let path = std::env::temp_dir().join(format!("spiceai-credential-{}", std::process::id()));
+    std::fs::write(&path, "first-token\n").expect("write token");
+    ledger.accept_credential("first-token");
+    let client = ClientBuilder::new()
+        .flight_url(&url)
+        .credential_file(&path)
+        .build()
+        .await
+        .expect("client");
+
+    let stream = client.sql("SELECT 1").await.expect("first query");
+    assert_eq!(count_rows(stream).await, 1);
+
+    std::fs::write(&path, "second-token\n").expect("rotate token");
+    ledger.accept_credential("second-token");
+    ledger.expire_sessions();
+
+    let stream = client.sql("SELECT 1").await.expect("query after rotation");
+    assert_eq!(count_rows(stream).await, 1);
+    assert_eq!(ledger.handshakes(), 2);
+
+    std::fs::remove_file(&path).expect("remove token");
 }
 
 /// A parameterized query has to reach the runtime under the same session and user
