@@ -982,6 +982,7 @@ fn default_http_url_for(flight_url: &str) -> Option<&'static str> {
 
 pub struct SpiceClientBuilder {
     api_key: Option<String>,
+    credential_file: Option<std::path::PathBuf>,
     user_agent: Option<String>,
     flight_url: Option<String>,
     http_url: Option<String>,
@@ -1004,6 +1005,7 @@ impl SpiceClientBuilder {
     pub fn new() -> Self {
         Self {
             api_key: None,
+            credential_file: None,
             user_agent: None,
             flight_url: None,
             http_url: None,
@@ -1020,6 +1022,16 @@ impl SpiceClientBuilder {
     #[must_use]
     pub fn api_key(mut self, api_key: &str) -> Self {
         self.api_key = Some(api_key.to_string());
+        self
+    }
+
+    /// Configures the `SpiceClient` to read its Flight credential from a file at every
+    /// handshake, so a short-lived token that is rotated on disk, such as a Kubernetes
+    /// service account token, keeps working. Takes precedence over [`Self::api_key`] for
+    /// Flight. HTTP-backed methods do not use it.
+    #[must_use]
+    pub fn credential_file(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.credential_file = Some(path.into());
         self
     }
 
@@ -1191,7 +1203,8 @@ impl SpiceClientBuilder {
                     self.cache_control.clone(),
                     self.max_retries,
                 )
-                .with_max_decoding_message_size(self.max_decoding_message_size),
+                .with_max_decoding_message_size(self.max_decoding_message_size)
+                .with_credential_file(self.credential_file.clone()),
             ),
             http_client,
         })
