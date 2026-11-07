@@ -37,3 +37,10 @@ pub use status::{ComponentStatus, ConnectionDetails, StatusError};
 
 // Further public exports and integrations
 pub use futures::StreamExt;
+
+/// The largest single Flight message, in bytes, a client accepts from the runtime unless
+/// [`ClientBuilder::max_decoding_message_size`] says otherwise: 100 MiB, the limit the
+/// Spice runtime applies to Flight messages it receives.
+///
+/// gRPC's own default is 4 MiB, which a result batch with many or wide rows can exceed.
+pub const DEFAULT_MAX_DECODING_MESSAGE_SIZE: usize = 100 * 1024 * 1024;

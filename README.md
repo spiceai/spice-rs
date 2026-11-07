@@ -412,6 +412,28 @@ Each `ConnectionDetails` carries the component `name` (`http`, `flight`, `metric
 `Ready`, `Disabled`, `Error`, `Refreshing`, `ShuttingDown` or `NotLoaded`. A status a
 future runtime adds deserializes into `ComponentStatus::Other` rather than failing.
 
+### Flight message size limit
+
+The client accepts Flight messages of up to 100 MiB (`spiceai::DEFAULT_MAX_DECODING_MESSAGE_SIZE`),
+the same limit the runtime applies to messages it receives. gRPC's own default is 4 MiB,
+which a result batch with many wide rows can exceed. A query whose result arrives in a
+larger message fails with `decoded message length too large`. `max_decoding_message_size()`
+raises or lowers the limit:
+
+```rust,no_run
+use spiceai::ClientBuilder;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+  let client = ClientBuilder::new()
+    .max_decoding_message_size(256 * 1024 * 1024)
+    .build()
+    .await?;
+  let _ = client;
+  Ok(())
+}
+```
+
 ### Bypass the results cache
 
 `cache_control()` sets the `Cache-Control` header the client sends on every request,
