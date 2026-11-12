@@ -30,7 +30,7 @@ jobs:
       id-token: write # Required for OIDC token exchange with crates.io
     steps:
       # actions/checkout v4.2.2
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@v4.2.2
         with:
           ref: ${{ github.event.release.tag_name || inputs.tag || github.ref }}
 
@@ -133,13 +133,13 @@ jobs:
 
       # rust-lang/crates-io-auth-action v1.0.1
       # https://github.com/rust-lang/crates-io-auth-action/releases/tag/v1.0.1
-      - uses: rust-lang/crates-io-auth-action@e919bc7605cde86df457cf5b93c5e103838bd879
+      - uses: rust-lang/crates-io-auth-action@v1.0.1
         id: auth
         if: ${{ steps.preflight.outputs.should_publish == 'true' }}
 
       - name: Install Rust toolchain
         # actions-rs/toolchain v1.0.7
-        uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af
+        uses: actions-rs/toolchain@v1.0.7
         if: ${{ steps.preflight.outputs.should_publish == 'true' }}
         with:
           profile: minimal
