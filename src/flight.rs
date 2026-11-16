@@ -111,6 +111,10 @@ impl SqlFlightClient {
         }
     }
 
+    pub(crate) fn max_retries(&self) -> u32 {
+        self.max_retries
+    }
+
     /// Sets the largest gRPC message, in bytes, this client accepts from the runtime.
     #[must_use]
     pub fn with_max_decoding_message_size(mut self, limit: usize) -> Self {

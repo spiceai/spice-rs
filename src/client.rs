@@ -109,7 +109,7 @@ impl SpiceClient {
     /// - `Box<dyn Error + Send + Sync>` for any query error
     pub async fn sql(&self, query: &str) -> Result<RetryableQueryStream, Error> {
         let retry_strategy = FibonacciBackoffBuilder::new()
-            .max_retries(Some(MAX_RETRIES as usize))
+            .max_retries(Some(self.flight.max_retries() as usize))
             .build();
 
         retry(retry_strategy, || async {
@@ -159,7 +159,7 @@ impl SpiceClient {
         params: Option<RecordBatch>,
     ) -> Result<RetryableQueryStream, Error> {
         let retry_strategy = FibonacciBackoffBuilder::new()
-            .max_retries(Some(MAX_RETRIES as usize))
+            .max_retries(Some(self.flight.max_retries() as usize))
             .build();
 
         retry(retry_strategy, || async {
@@ -1049,7 +1049,11 @@ impl SpiceClientBuilder {
         self
     }
 
-    /// Configures the `SpiceClient` to use the given maximum number of retries.
+    /// Sets how many times a query is retried after a connection reset, both when it
+    /// is first sent ([`sql`](SpiceClient::sql), [`sql_with_params`](SpiceClient::sql_with_params))
+    /// and when its result stream is interrupted. Defaults to 3; `0` turns retries off.
+    /// Retries back off on a Fibonacci schedule, so a large value can hold a failing
+    /// call open for minutes.
     #[must_use]
     pub fn max_retries(mut self, max_retries: u32) -> Self {
         self.max_retries = max_retries;
@@ -1227,7 +1231,17 @@ mod tests {
     /// Accepts connections and resets them, so every attempt a retry loop makes fails
     /// the same way and the budget runs out.
     async fn always_reset_endpoint() -> String {
+        counting_reset_endpoint().await.0
+    }
+
+    /// Like [`always_reset_endpoint`], and also counts the connections the client makes,
+    /// one per attempt.
+    async fn counting_reset_endpoint() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use tokio::io::AsyncReadExt;
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&attempts);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -1236,6 +1250,7 @@ mod tests {
 
         tokio::spawn(async move {
             while let Ok((mut socket, _)) = listener.accept().await {
+                counter.fetch_add(1, Ordering::SeqCst);
                 tokio::spawn(async move {
                     // Let the client send its preface first, so this is a reset rather
                     // than a refused connection.
@@ -1246,7 +1261,46 @@ mod tests {
             }
         });
 
-        format!("http://{addr}")
+        (format!("http://{addr}"), attempts)
+    }
+
+    async fn attempts_until_reset_error(max_retries: u32, with_params: bool) -> usize {
+        let (url, attempts) = counting_reset_endpoint().await;
+        let client = SpiceClient::builder()
+            .flight_url(&url)
+            .max_retries(max_retries)
+            .build()
+            .await
+            .expect("client");
+
+        let result = if with_params {
+            client.sql_with_params("SELECT 1", None).await
+        } else {
+            client.sql("SELECT 1").await
+        };
+        let error = result.err().expect("every attempt resets");
+        assert!(
+            matches!(error, Error::ConnectionReset { .. }),
+            "expected ConnectionReset, got {error:?}"
+        );
+        attempts.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// `max_retries(0)` turns retries off: one attempt, not the default four.
+    #[tokio::test]
+    async fn sql_honors_max_retries_zero() {
+        assert_eq!(attempts_until_reset_error(0, false).await, 1);
+    }
+
+    #[tokio::test]
+    async fn sql_with_params_honors_max_retries_zero() {
+        assert_eq!(attempts_until_reset_error(0, true).await, 1);
+    }
+
+    /// The configured count, not a fixed 3, bounds the retries.
+    #[tokio::test]
+    async fn sql_honors_max_retries_one() {
+        assert_eq!(attempts_until_reset_error(1, false).await, 2);
     }
 
     /// Exercises the wiring, not just the classifier: the reset has to survive the retry
