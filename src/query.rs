@@ -920,16 +920,18 @@ impl QueryHttpClient {
             path_segments.push("refresh");
         }
 
-        let request_builder = self.with_client_headers(self.client.post(url));
-        let response = if request.has_overrides() {
-            request_builder.json(request).send().await
-        } else {
-            request_builder.send().await
-        }
-        .map_err(|e| DatasetError::HttpError {
-            dataset_name: dataset_name.to_string(),
-            message: e.to_string(),
-        })?;
+        // Always send a JSON body, `{}` when there are no overrides. Runtimes before
+        // v2.4.3 answer a body-less POST that carries `Content-Type: application/json`
+        // (as some proxies add) with 400 "EOF while parsing", even for a missing dataset.
+        let response = self
+            .with_client_headers(self.client.post(url))
+            .json(request)
+            .send()
+            .await
+            .map_err(|e| DatasetError::HttpError {
+                dataset_name: dataset_name.to_string(),
+                message: e.to_string(),
+            })?;
 
         match response.status().as_u16() {
             200 | 201 => response.json().await.map_err(|e| DatasetError::ParseError {
