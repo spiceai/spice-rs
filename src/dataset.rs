@@ -71,12 +71,6 @@ impl DatasetRefreshRequest {
         self.refresh_jitter_max = Some(refresh_jitter_max.into());
         self
     }
-
-    pub(crate) fn has_overrides(&self) -> bool {
-        self.refresh_sql.is_some()
-            || self.refresh_mode.is_some()
-            || self.refresh_jitter_max.is_some()
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -89,9 +83,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_refresh_request_default_has_no_overrides() {
-        let request = DatasetRefreshRequest::new();
-        assert!(!request.has_overrides());
+    fn test_refresh_request_default_serializes_to_an_empty_object() {
+        let serialized =
+            serde_json::to_string(&DatasetRefreshRequest::new()).expect("serialize request");
+        assert_eq!(serialized, "{}");
     }
 
     #[test]
@@ -101,7 +96,6 @@ mod tests {
             .with_refresh_mode(DatasetRefreshMode::Full)
             .with_refresh_jitter_max("30s");
 
-        assert!(request.has_overrides());
         assert_eq!(
             request.refresh_sql.as_deref(),
             Some("SELECT * FROM taxi_trips")

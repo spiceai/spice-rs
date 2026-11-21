@@ -1933,8 +1933,11 @@ mod tests {
     async fn test_refresh_dataset_wrappers() {
         let server = MockServer::start().await;
 
+        // No overrides still sends `{}` as JSON, which runtimes before v2.4.3 need.
         Mock::given(method("POST"))
             .and(path("/v1/datasets/orders_default/acceleration/refresh"))
+            .and(header("content-type", "application/json"))
+            .and(body_json(json!({})))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "message": "Refresh started"
             })))
@@ -1973,6 +1976,32 @@ mod tests {
             .await
             .expect("refresh dataset with explicit overrides");
         assert_eq!(custom_refresh.message, "Refresh scheduled");
+    }
+
+    #[tokio::test]
+    async fn test_refresh_dataset_missing_dataset_is_not_found() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/datasets/missing/acceleration/refresh"))
+            .and(header("content-type", "application/json"))
+            .and(body_json(json!({})))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+                "message": "Dataset missing not found"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = test_client(Some(&server.uri()));
+
+        let err = client
+            .refresh_dataset("missing")
+            .await
+            .expect_err("a missing dataset fails the refresh");
+        assert!(
+            matches!(&err, DatasetError::NotFound { dataset_name } if dataset_name == "missing"),
+            "{err}"
+        );
     }
 
     /// A 200 whose body is not a search response must not read as an empty
