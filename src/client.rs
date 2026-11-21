@@ -1052,8 +1052,9 @@ impl SpiceClientBuilder {
     /// Sets how many times a query is retried after a connection reset, both when it
     /// is first sent ([`sql`](SpiceClient::sql), [`sql_with_params`](SpiceClient::sql_with_params))
     /// and when its result stream is interrupted. Defaults to 3; `0` turns retries off.
-    /// Retries back off on a Fibonacci schedule, so a large value can hold a failing
-    /// call open for minutes.
+    /// Retries of a query that is being sent back off on a Fibonacci schedule, so a large
+    /// value can hold a failing call open for minutes; a result stream that is interrupted
+    /// is re-sent at once, with no delay.
     #[must_use]
     pub fn max_retries(mut self, max_retries: u32) -> Self {
         self.max_retries = max_retries;
